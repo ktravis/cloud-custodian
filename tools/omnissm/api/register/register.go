@@ -72,7 +72,7 @@ var (
 	ssmClient *ssm.SSM
 
 	// RegistrationTable DynamodDb Table for storing instance regisrations
-	RegistrationTable = os.Getenv("REGISTRATIONS_TABLE")
+	RegistrationTable = os.Getenv("REGISTRATION_TABLE")
 )
 
 func init() {
