@@ -17,11 +17,15 @@ package main
 
 import (
 	"context"
+	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"io/ioutil"
+	"log"
+	"net/http"
 	"os"
 	"strings"
 
@@ -34,6 +38,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/dynamodbattribute"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/dgrijalva/jwt-go"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -60,16 +66,25 @@ BQADgYEAFYcz1OgEhQBXIwIdsgCOS8vEtiJYF+j9uO6jz7VOmJqO+pRlAbRlvY8T
 C1haGgSI/A1uZUKs/Zfnph0oEI0/hu1IIJ/SKBDtN5lvmZ/IzbOPIJWirlsllQIQ
 7zvWbGd9c9+Rm3p04oTvhup99la7kZqevJK0QRdD/6NpCKsqP/0=
 -----END CERTIFICATE-----`
+
+	GCPCertAddress = "https://www.googleapis.com/oauth2/v1/certs"
+
+	ProviderAWS = "aws"
+	ProviderGCP = "gcp"
 )
 
 var (
 	// RSACert AWS Public Certificate
-	RSACert *x509.Certificate
+	AWSRSACert *x509.Certificate
 	// RSACertPEM Decoded pem signature
-	RSACertPEM, _ = pem.Decode([]byte(AWSRSAIdentityCert))
+	AWSRSACertPEM, _ = pem.Decode([]byte(AWSRSAIdentityCert))
+
+	GCPPubKeys = make(map[string]*rsa.PublicKey)
 
 	dbClient  *dynamodb.DynamoDB
 	ssmClient *ssm.SSM
+
+	Region = os.Getenv("AWS_REGION")
 
 	// RegistrationTable DynamodDb Table for storing instance regisrations
 	RegistrationTable = os.Getenv("REGISTRATION_TABLE")
@@ -82,8 +97,39 @@ var (
 func init() {
 	var err error
 
-	if RSACert, err = x509.ParseCertificate(RSACertPEM.Bytes); err != nil {
+	// Parse AWS public certificate
+	if AWSRSACert, err = x509.ParseCertificate(AWSRSACertPEM.Bytes); err != nil {
 		panic(err)
+	}
+
+	// Acquire GCP public certificates, which rotate daily
+	resp, err := http.Get(GCPCertAddress)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		log.Fatalf("unexpected response from google cert endpoint: %s", string(b))
+	}
+
+	var keys map[string]string
+
+	if err := json.Unmarshal(b, &keys); err != nil {
+		log.Fatal(err)
+	}
+
+	// Populate RSA public key map
+	for k, v := range keys {
+		pub, err := jwt.ParseRSAPublicKeyFromPEM([]byte(v))
+		if err != nil {
+			log.Fatal(err)
+		}
+		GCPPubKeys[k] = pub
 	}
 
 	cfg, err := external.LoadDefaultAWSConfig()
@@ -100,16 +146,28 @@ func init() {
 	}
 }
 
-// RegistrationRequest structure of instance registration request
-type RegistrationRequest struct {
-	Identity  string `json:"identity"`
-	Signature string `json:"signature"`
-	Provider  string `json:"provider"`
-	ManagedID string `json:"managed-id"`
+type InstanceIdentity interface {
+	Provider() string
+	Identifier() string
+}
+
+type GCPInstanceIdentity struct {
+	ProjectID                 string `json:"project_id"`
+	ProjectNumber             uint   `json:"project_number"`
+	Zone                      string `json:"zone"`
+	InstanceID                string `json:"instance_id"`
+	InstanceName              string `json:"instance_name"`
+	InstanceCreationTimestamp uint   `json:"instance_creation_timestamp"`
+}
+
+func (GCPInstanceIdentity) Provider() string { return ProviderGCP }
+
+func (i GCPInstanceIdentity) Identifier() string {
+	return fmt.Sprintf("%d-%s", i.ProjectNumber, i.InstanceID)
 }
 
 // InstanceIdentity provides for ec2 metadata instance information
-type InstanceIdentity struct {
+type AWSInstanceIdentity struct {
 	ManagedID        string `json:"managedId"`
 	AvailabilityZone string `json:"availabilityZone"`
 	Region           string `json:"region"`
@@ -118,103 +176,18 @@ type InstanceIdentity struct {
 	InstanceType     string `json:"instanceType"`
 }
 
-// GetIdentifier Get a unique identifier for an instance
-func (i *InstanceIdentity) GetIdentifier() string {
-	ident := strings.Join([]string{i.AccountID, i.InstanceID}, "-")
+func (AWSInstanceIdentity) Provider() string { return ProviderAWS }
+
+// Identifier Get a unique identifier for an instance
+func (i AWSInstanceIdentity) Identifier() string {
+	return strings.Join([]string{i.AccountID, i.InstanceID}, "-")
+}
+
+func idHash(ident string) string {
 	h := sha1.New()
 	h.Write([]byte(ident))
 	bid := h.Sum(nil)
 	return fmt.Sprintf("%x", bid)
-}
-
-// GetRegistration fetch instance registration from db
-func (i *InstanceIdentity) GetRegistration() (*InstanceRegistration, error) {
-	registration := &InstanceRegistration{}
-
-	params := &dynamodb.GetItemInput{
-		TableName: aws.String(RegistrationTable),
-		AttributesToGet: []string{
-			"id", "ActivationId", "ActivationCode", "ManagedID",
-		},
-		Key: map[string]dynamodb.AttributeValue{
-			"id": {
-				S: aws.String(i.GetIdentifier()),
-			},
-		},
-	}
-
-	getRequest := dbClient.GetItemRequest(params)
-	getResult, err := getRequest.Send()
-	if err != nil {
-		return nil, err
-	}
-	err = dynamodbattribute.UnmarshalMap(getResult.Item, registration)
-	if err != nil {
-		return nil, err
-	}
-	return registration, nil
-}
-
-// UpdateManagedID Record SSM Managed ID for an Instance
-func (r *InstanceRegistration) UpdateManagedID(identity InstanceIdentity) error {
-
-	params := &dynamodb.UpdateItemInput{
-		TableName: aws.String(RegistrationTable),
-		Key: map[string]dynamodb.AttributeValue{
-			"id": dynamodb.AttributeValue{
-				S: aws.String(identity.GetIdentifier())}},
-		UpdateExpression: aws.String("SET ManagedId = :mid"),
-		ExpressionAttributeValues: map[string]dynamodb.AttributeValue{
-			":mid": {
-				S: aws.String(identity.ManagedID),
-			},
-		},
-	}
-
-	updateReq := dbClient.UpdateItemRequest(params)
-	_, err := updateReq.Send()
-
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// RegisterInstance Create SSM activation for instance and store
-func (i *InstanceIdentity) RegisterInstance() (*InstanceRegistration, error) {
-
-	registration := &InstanceRegistration{}
-
-	activateParams := &ssm.CreateActivationInput{
-		DefaultInstanceName: aws.String(strings.Join([]string{i.AccountID, i.InstanceID}, "-")),
-		IamRole:             aws.String(SSMInstanceRole),
-		Description: aws.String(
-			strings.Join([]string{i.AccountID, i.InstanceID}, "-")),
-	}
-
-	activateReq := ssmClient.CreateActivationRequest(activateParams)
-	activateResult, err := activateReq.Send()
-
-	if err != nil {
-		return nil, err
-	}
-	registration.ActivationCode = *activateResult.ActivationCode
-	registration.ActivationID = *activateResult.ActivationId
-	registration.ID = i.GetIdentifier()
-
-	regRecord, err := dynamodbattribute.MarshalMap(registration)
-	insertParams := &dynamodb.PutItemInput{
-		Item:      regRecord,
-		TableName: aws.String(RegistrationTable),
-	}
-
-	insertRequest := dbClient.PutItemRequest(insertParams)
-	insertResult, err := insertRequest.Send()
-
-	if err != nil {
-		return nil, fmt.Errorf("Put Registration Error %s %s", insertResult, err)
-	}
-	return registration, nil
 }
 
 // InstanceRegistration Minimal
@@ -225,88 +198,173 @@ type InstanceRegistration struct {
 	ManagedID      string `json:"ManagedId"`
 }
 
-func validateRequest(requestBody string) (InstanceIdentity, events.APIGatewayProxyResponse) {
-
-	var regRequest RegistrationRequest
-	var identity InstanceIdentity
-
-	err := json.Unmarshal([]byte(requestBody), &regRequest)
-	if err != nil {
-		return identity, newErrorResponse("invalid-request", "malformed json", 400)
+// GetRegistration fetch instance registration from db
+func GetRegistration(id string) (*InstanceRegistration, error) {
+	params := &dynamodb.GetItemInput{
+		TableName: aws.String(RegistrationTable),
+		AttributesToGet: []string{
+			"id", "ActivationId", "ActivationCode", "ManagedID",
+		},
+		Key: map[string]dynamodb.AttributeValue{
+			"id": {
+				S: aws.String(id),
+			},
+		},
 	}
 
+	req := dbClient.GetItemRequest(params)
+	resp, err := req.Send()
+	if err != nil {
+		return nil, err
+	}
+	var r InstanceRegistration
+	if err := dynamodbattribute.UnmarshalMap(resp.Item, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// RegisterInstance Create SSM activation for instance and store
+func RegisterInstance(id string) (*InstanceRegistration, error) {
+	activateReq := ssmClient.CreateActivationRequest(&ssm.CreateActivationInput{
+		DefaultInstanceName: aws.String(id),
+		Description:         aws.String(id),
+		IamRole:             aws.String(SSMInstanceRole),
+	})
+	resp, err := activateReq.Send()
+	if err != nil {
+		return nil, err
+	}
+
+	r := &InstanceRegistration{
+		ID:             idHash(id),
+		ActivationCode: *resp.ActivationCode,
+		ActivationID:   *resp.ActivationId,
+	}
+	item, err := dynamodbattribute.MarshalMap(r)
+	if err != nil {
+		return nil, errors.Wrap(err, "registration item could not be marshaled")
+	}
+	insertParams := &dynamodb.PutItemInput{
+		Item:      item,
+		TableName: aws.String(RegistrationTable),
+	}
+
+	insertRequest := dbClient.PutItemRequest(insertParams)
+	if resp, err := insertRequest.Send(); err != nil {
+		return nil, errors.Wrapf(err, "Put Registration failed (%v)", resp)
+	}
+	return r, nil
+}
+
+// UpdateManagedID Record SSM Managed ID for an Instance
+func UpdateManagedID(id string, managedID string) error {
+	params := &dynamodb.UpdateItemInput{
+		TableName: aws.String(RegistrationTable),
+		Key: map[string]dynamodb.AttributeValue{
+			"id": dynamodb.AttributeValue{
+				S: aws.String(id),
+			},
+		},
+		UpdateExpression: aws.String("SET ManagedId = :mid"),
+		ExpressionAttributeValues: map[string]dynamodb.AttributeValue{
+			":mid": {
+				S: aws.String(managedID),
+			},
+		},
+	}
+
+	req := dbClient.UpdateItemRequest(params)
+	if _, err := req.Send(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RegistrationRequest structure of instance registration request
+type RegistrationRequest struct {
+	Identity  string `json:"identity"`
+	Signature string `json:"signature"`
+	Provider  string `json:"provider"`
+	ManagedID string `json:"managed-id"`
+}
+
+func (r *RegistrationRequest) Validate() (InstanceIdentity, events.APIGatewayProxyResponse) {
 	// TODO: At the moment this is AWS Specific, support GCP & Azure to the extant possible.
-	switch regRequest.Provider {
-	case "aws":
+	switch r.Provider {
+	case ProviderAWS:
+		signature, err := base64.StdEncoding.DecodeString(r.Signature)
+		if err != nil {
+			return nil, newErrorResponse("invalid-request", "malformed rsa signature", 400)
+		}
+		err = AWSRSACert.CheckSignature(x509.SHA256WithRSA, []byte(r.Identity), signature)
+		if err != nil {
+			return nil, newErrorResponse("invalid-signature", "invalid identity", 400)
+		}
+
+		var i AWSInstanceIdentity
+		// We verified the signature, so malformed here would more than odd.
+		_ = json.Unmarshal([]byte(r.Identity), &i)
+
+		// Capture request variable into identity
+		i.ManagedID = r.ManagedID
+
+		return i, events.APIGatewayProxyResponse{}
+	case ProviderGCP:
+		p := &jwt.Parser{
+			ValidMethods:  []string{"RS256"},
+			UseJSONNumber: true,
+		}
+		var claims struct {
+			jwt.StandardClaims
+			Identity GCPInstanceIdentity `json:"google"`
+		}
+		// r.Signature is the signed JWT returned by the GCP instance
+		// metadata service, which contains the identity document
+		_, err := p.ParseWithClaims(r.Signature, &claims, func(t *jwt.Token) (interface{}, error) {
+			kid, ok := t.Header["kid"].(string)
+			if !ok {
+				return nil, errors.Errorf("unexpected kid in token header: %v", t.Header["kid"])
+			}
+
+			key, ok := GCPPubKeys[kid]
+			if !ok {
+				return nil, errors.Errorf("invalid key id: %s", kid)
+			}
+			return key, nil
+		})
+		if err != nil {
+			return nil, newErrorResponse("invalid-request", err.Error(), 400)
+		}
+		return claims.Identity, events.APIGatewayProxyResponse{}
 	default:
-		return identity, newErrorResponse("invalid-request", "unknown provider", 400)
+		return nil, newErrorResponse("invalid-request", "unknown provider", 400)
 	}
-
-	signature, err := base64.StdEncoding.DecodeString(string(regRequest.Signature))
-	if err != nil {
-		return identity, newErrorResponse("invalid-request", "malformed rsa signature", 400)
-	}
-	err = RSACert.CheckSignature(x509.SHA256WithRSA, []byte(regRequest.Identity), signature)
-	if err != nil {
-		return identity, newErrorResponse("invalid-signature", "invalid identity", 400)
-	}
-
-	// We verified the signature, so malformed here would more than odd.
-	_ = json.Unmarshal([]byte(regRequest.Identity), &identity)
-
-	// Capture request variable into identity
-	identity.ManagedID = regRequest.ManagedID
-
-	return identity, events.APIGatewayProxyResponse{}
 }
 
-func handleUpdateManagedID(identity InstanceIdentity) events.APIGatewayProxyResponse {
-	fmt.Println("Instance Update SSMID Request", identity.InstanceID, identity.Region, identity.AccountID, identity.GetIdentifier())
+func handleRegister(i InstanceIdentity) events.APIGatewayProxyResponse {
+	fmt.Printf("Instance Registration Request: %+v\n", i)
 
-	registration, err := identity.GetRegistration()
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("Queried Instance", registration)
-
-	if identity.ManagedID != "" {
-		registration.UpdateManagedID(identity)
-	}
-
-	response := map[string]interface{}{
-		"instance-id": identity.InstanceID,
-		"account-id":  identity.AccountID,
-		"managed-id":  identity.ManagedID,
-	}
-	serialized, err := json.Marshal(response)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("Update ssmid response", string(serialized))
-	return events.APIGatewayProxyResponse{Body: string(serialized), StatusCode: 200}
-}
-
-func handleRegistrationRequest(identity InstanceIdentity) events.APIGatewayProxyResponse {
-	fmt.Println("Instance Registration Request", identity.InstanceID, identity.Region, identity.AccountID, identity.GetIdentifier())
-	registration, err := identity.GetRegistration()
+	id := i.Identifier()
+	reg, err := GetRegistration(id)
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Println("Queried Instance", registration)
-	if len(registration.ActivationCode) < 1 {
-		registration, err = identity.RegisterInstance()
+	fmt.Println("Queried Instance", reg)
+	if len(reg.ActivationCode) < 1 {
+		reg, err = RegisterInstance(id)
 		if err != nil {
 			panic(err)
 		}
 	}
 
 	response := map[string]interface{}{
-		"instance-id":     identity.InstanceID,
-		"account-id":      identity.AccountID,
-		"region":          identity.Region,
-		"activation-id":   registration.ActivationID,
-		"activation-code": registration.ActivationCode,
+		//"instance-id":     identity.InstanceID,
+		//"account-id":      identity.AccountID,
+		"region":          Region,
+		"activation-id":   reg.ActivationID,
+		"activation-code": reg.ActivationCode,
 	}
 
 	serialized, err := json.Marshal(response)
@@ -314,6 +372,35 @@ func handleRegistrationRequest(identity InstanceIdentity) events.APIGatewayProxy
 		panic(err)
 	}
 	fmt.Println("Register Response", string(serialized))
+	return events.APIGatewayProxyResponse{Body: string(serialized), StatusCode: 200}
+}
+
+func handleUpdateManagedID(i InstanceIdentity, mid string) events.APIGatewayProxyResponse {
+	fmt.Printf("Instance Update SSMID Request: %+v\n", i)
+
+	id := i.Identifier()
+
+	reg, err := GetRegistration(id)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Queried Instance", reg)
+
+	//if identity.ManagedID != "" {
+	UpdateManagedID(id, mid)
+	//}
+
+	response := map[string]interface{}{
+		//"instance-id": identity.InstanceID,
+		//"account-id":  identity.AccountID,
+		"managed-id": mid,
+		"identity":   i,
+	}
+	serialized, err := json.Marshal(response)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Update ssmid response", string(serialized))
 	return events.APIGatewayProxyResponse{Body: string(serialized), StatusCode: 200}
 }
 
@@ -326,27 +413,47 @@ func newErrorResponse(name, msg string, statusCode int) events.APIGatewayProxyRe
 	return events.APIGatewayProxyResponse{Body: string(body), StatusCode: statusCode}
 }
 
+func ResourceAllowed(i InstanceIdentity) bool {
+	switch t := i.(type) {
+	case AWSInstanceIdentity:
+		return accountWhitelist[t.InstanceID]
+	case GCPInstanceIdentity:
+		return false // TODO
+	default:
+		return false
+	}
+}
+
 func handleRequest(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 
 	fmt.Printf("Processing request data for request %s.\n", request.RequestContext.RequestID)
 	fmt.Printf("Body size = %d.\n", len(request.Body))
 
-	identity, errorResponse := validateRequest(request.Body)
+	var req RegistrationRequest
+	err := json.Unmarshal([]byte(request.Body), &req)
+	if err != nil {
+		return newErrorResponse("invalid-request", "malformed json", 400), nil
+	}
 
-	if len(identity.InstanceID) < 1 {
+	i, errorResponse := req.Validate()
+	if i == nil {
 		return errorResponse, nil
 	}
 
-	if !accountWhitelist[identity.AccountID] {
+	if !ResourceAllowed(i) {
 		// Account is not whitelisted, deny request
-		fmt.Printf("Request from account '%s' is not whitelisted.\n", identity.AccountID)
+		fmt.Printf("Request from resourace '%+v' is not whitelisted.\n", i)
 		return newErrorResponse("invalid-request", "invalid account", 401), nil
 	}
 
-	if request.HTTPMethod == "POST" {
-		return handleRegistrationRequest(identity), nil
+	switch request.HTTPMethod {
+	case "POST":
+		return handleRegister(i), nil
+	case "PATCH":
+		return handleUpdateManagedID(i, req.ManagedID), nil
+	default:
+		return newErrorResponse("invalid-method", fmt.Sprintf("method not allowed: %s", request.HTTPMethod), 405), nil
 	}
-	return handleUpdateManagedID(identity), nil
 }
 
 func main() {
