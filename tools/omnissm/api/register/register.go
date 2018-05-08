@@ -416,7 +416,7 @@ func newErrorResponse(name, msg string, statusCode int) events.APIGatewayProxyRe
 func ResourceAllowed(i InstanceIdentity) bool {
 	switch t := i.(type) {
 	case AWSInstanceIdentity:
-		return accountWhitelist[t.InstanceID]
+		return accountWhitelist[t.AccountID]
 	case GCPInstanceIdentity:
 		return false // TODO
 	default:
