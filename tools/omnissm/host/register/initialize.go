@@ -59,6 +59,7 @@ type NodeInfo struct {
 	BinSSMAgent     string
 	BinSSMInfo      string
 	BinService      string
+	ServiceArgs     []string
 	RegistrationURL string
 	Identity        string
 	Signature       string
@@ -78,9 +79,21 @@ func NewNodeInfo() (*NodeInfo, error) {
 		return nil, errors.New("Package Missing - Error finding ssm-cli")
 	}
 
-	svcCmdPath, err := exec.LookPath("service")
+	svcPath, err := exec.LookPath("systemctl")
 	if err != nil {
-		return nil, errors.New("Service cmd missing - no upstart/systemd?")
+		if e, ok := err.(*exec.Error); !(ok && e.Err == exec.ErrNotFound) {
+			return nil, errors.Wrap(err, "Unable to find systemctl")
+		}
+	}
+	serviceCmdArgs := []string{"amazon-ssm-agent", "restart"}
+
+	if svcPath == "" {
+		svcPath, err = exec.LookPath("initctl")
+		if err != nil {
+			return nil, errors.New("Package Missing - Error finding systemctl or initctl")
+		}
+		// initctl expects command first, then service name
+		serviceCmdArgs = []string{"restart", "amazon-ssm-agent"}
 	}
 
 	registrationURL := os.Getenv("OMNISSM_URI")
@@ -91,7 +104,8 @@ func NewNodeInfo() (*NodeInfo, error) {
 	n := NodeInfo{
 		BinSSMAgent:     ssmCmdPath,
 		BinSSMInfo:      ssmInfoPath,
-		BinService:      svcCmdPath,
+		BinService:      svcPath,
+		ServiceArgs:     serviceCmdArgs,
 		RegistrationURL: registrationURL,
 		netClient:       &http.Client{Timeout: 10 * time.Second},
 	}
@@ -186,7 +200,7 @@ func (n *NodeInfo) Register() error {
 		return errors.Errorf("SSM agent command failed: %v - %s", err, string(ssmOut))
 	}
 
-	svcCmd := exec.Command(n.BinService, "amazon-ssm-agent", "restart")
+	svcCmd := exec.Command(n.BinService, n.ServiceArgs...)
 	svcOut, err := svcCmd.CombinedOutput()
 	if err != nil {
 		return errors.Errorf("SSM agent restart failed: %v - %s", err, string(svcOut))
