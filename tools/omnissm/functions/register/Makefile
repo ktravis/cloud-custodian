@@ -1,5 +1,5 @@
 
-bucket = c7n-ssm-build
+bucket = cof-omnissm-dev
 stack = omnissm
 
 build:
