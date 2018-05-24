@@ -29,7 +29,7 @@ var RegisterCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		url := viper.GetString("register_endpoint")
 		if url == "" {
-			endpoints := viper.GetString("register_endpoints")
+			endpoints := viper.GetStringMapString("register_endpoints")
 			if endpoints != nil {
 				region := identity.GetLocalInstanceRegion()
 				if region == "" {
