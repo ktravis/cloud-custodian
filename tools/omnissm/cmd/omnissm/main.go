@@ -43,7 +43,7 @@ func checkDebug(cmd *cobra.Command, args []string) {
 func init() {
 	viper.AutomaticEnv()
 	viper.SetEnvPrefix("OMNISSM")
-	viper.SetConfigName("config")
+	viper.SetConfigName("omnissm")
 	viper.AddConfigPath("/etc/omnissm/")
 	viper.AddConfigPath(".")
 
