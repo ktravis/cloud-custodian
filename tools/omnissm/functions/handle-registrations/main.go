@@ -127,7 +127,7 @@ func main() {
 			}
 			if amiWhitelist != nil {
 				k := strings.Join([]string{doc.AccountId, doc.Region, doc.ImageId}, ",")
-				if !amiWhitelist[k] {
+				if doc.ImageId == "" || !amiWhitelist[k] {
 					return nil, lambda.BadRequestError{fmt.Sprintf("registration from AMI %#v is not permitted", doc.ImageId)}
 				}
 			}
