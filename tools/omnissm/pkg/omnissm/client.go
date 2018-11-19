@@ -55,7 +55,7 @@ func NewClient(url string) (*Client, error) {
 		registrationURL: url,
 		service:         s,
 	}
-	c.ManagedId, _ = ssm.ReadRegistrationFile(ssm.DefaultLinuxSSMRegistrationPath)
+	c.ManagedId, _ = ssm.ReadRegistrationFile(ssm.DefaultSSMRegistrationPath)
 	return c, nil
 }
 
