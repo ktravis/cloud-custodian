@@ -44,7 +44,7 @@ type Client struct {
 
 // New returns a new client for the registrations API
 func NewClient(url string) (*Client, error) {
-	s, err := servicectl.New("amazon-ssm-agent")
+	s, err := servicectl.New(AmazonSSMAgentServiceName)
 	if err != nil {
 		return nil, err
 	}

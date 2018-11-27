@@ -15,8 +15,11 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
@@ -52,5 +55,7 @@ var RegisterCmd = &cobra.Command{
 
 func init() {
 	RegisterCmd.Flags().String("register-endpoint", "", "")
-	viper.BindPFlags(RegisterCmd.Flags())
+	RegisterCmd.LocalFlags().VisitAll(func(f *pflag.Flag) {
+		viper.BindPFlag(strings.Replace(f.Name, "-", "_", -1), RegisterCmd.Flags().Lookup(f.Name))
+	})
 }
