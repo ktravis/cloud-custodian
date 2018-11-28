@@ -4,7 +4,6 @@ package servicectl
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
@@ -51,8 +50,6 @@ func (w *windows) wait(s *mgr.Service, timeout time.Duration, desired svc.State)
 		if st.State == desired {
 			return nil
 		}
-		//return errors.Errorf("service %s is in state %v, not %v as requested", w.name, st.State, desired)
-		fmt.Printf("looping %v ms\n", st.WaitHint)
 		d := st.WaitHint
 		if d == 0 {
 			d = 10
