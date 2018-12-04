@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package omnissm
+package omnissmclient
 
 import (
 	"bytes"
@@ -23,56 +23,60 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"github.com/rs/zerolog/log"
 
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ec2metadata"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/servicectl"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm"
 )
 
-const ClientVersion = "1.1.0"
+const Version = "1.2.0"
 
 type Client struct {
 	*http.Client
+	ManagedId string
+	Provider  string
 
 	document, signature string
 	registrationURL     string
-	ManagedId           string
-
-	service servicectl.Service
+	agentPath           string
 }
 
 // New returns a new client for the registrations API
-func NewClient(url string) (*Client, error) {
-	s, err := servicectl.New(AmazonSSMAgentServiceName)
+func New(url, doc, signature string) (*Client, error) {
+	cmd, err := exec.LookPath("amazon-ssm-agent")
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "unable to locate 'amazon-ssm-agent' executable")
 	}
 	c := &Client{
 		Client:          &http.Client{Timeout: time.Second * 10},
-		document:        string(ec2metadata.GetLocalInstanceDocument()),
-		signature:       string(ec2metadata.GetLocalInstanceSignature()),
+		Provider:        "aws", // hard-coded for now
+		document:        doc,
+		signature:       signature,
 		registrationURL: url,
-		service:         s,
+		agentPath:       cmd,
 	}
 	c.ManagedId, _ = ssm.ReadRegistrationFile(ssm.DefaultSSMRegistrationPath)
 	return c, nil
+}
+
+// Managed returns whether the instance has already registered, and has an mi-*
+// managed instance ID.
+func (c *Client) Managed() bool {
+	return ssm.IsManagedInstance(c.ManagedId)
 }
 
 // Register requests an activation from the registrations API and attempts to
 // register the current instance with SSM. A new activation will be created
 // should an existing one not be found in the registrations table.
 func (c *Client) Register() error {
-	data, err := json.Marshal(RegistrationRequest{
+	data, err := json.Marshal(omnissm.RegistrationRequest{
 		Provider:      "aws",
 		Document:      c.document,
 		Signature:     c.signature,
-		ClientVersion: ClientVersion,
+		ClientVersion: Version,
 	})
 	if err != nil {
 		return errors.Wrap(err, "cannot marshal new registration request")
 	}
-	log.Info().Msgf("registration request: %#v", string(data))
 	resp, err := c.Post(c.registrationURL, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -85,15 +89,11 @@ func (c *Client) Register() error {
 	if resp.StatusCode != 200 {
 		return errors.Errorf("cannot register new resource: %d, %s", resp.StatusCode, string(data))
 	}
-	var r RegistrationResponse
+	var r omnissm.RegistrationResponse
 	if err := json.Unmarshal(data, &r); err != nil {
 		return errors.WithStack(err)
 	}
-	cmd, err := exec.LookPath("amazon-ssm-agent")
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	out, err := exec.Command(cmd, "-register", "-y",
+	out, err := exec.Command(c.agentPath, "-register", "-y",
 		"-id", r.ActivationId,
 		"-code", r.ActivationCode,
 		"-i", r.ManagedId,
@@ -101,7 +101,7 @@ func (c *Client) Register() error {
 	if err != nil {
 		return errors.Wrapf(err, "amazon-ssm-agent failed: %v\noutput: %s", err, string(out))
 	}
-	return c.service.Restart()
+	return nil
 }
 
 // Update attempts to update the ManagedId in the registrations table
@@ -114,12 +114,12 @@ func (c *Client) Update() error {
 		return errors.Errorf("cannot update node, not a managed instance: %#v", info.InstanceId)
 	}
 	c.ManagedId = info.InstanceId
-	data, err := json.Marshal(RegistrationRequest{
+	data, err := json.Marshal(omnissm.RegistrationRequest{
 		Provider:      "aws",
 		Document:      c.document,
 		Signature:     c.signature,
 		ManagedId:     info.InstanceId,
-		ClientVersion: ClientVersion,
+		ClientVersion: Version,
 	})
 	if err != nil {
 		return errors.Wrap(err, "cannot marshal registration request")

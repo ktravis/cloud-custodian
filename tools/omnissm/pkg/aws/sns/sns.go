@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"github.com/aws/aws-sdk-go/aws"
+	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sns"
@@ -59,4 +60,11 @@ func (s *SNS) Publish(ctx context.Context, topicArn string, msg []byte) error {
 	})
 	return errors.Wrap(err, "sns.Publish")
 
+}
+
+func (s *SNS) Client() *awsclient.Client {
+	if svc, ok := s.SNSAPI.(*sns.SNS); ok {
+		return svc.Client
+	}
+	return nil
 }

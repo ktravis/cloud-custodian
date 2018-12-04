@@ -12,24 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
-
-import (
-	"fmt"
-
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm/omnissmclient"
-	"github.com/spf13/cobra"
-)
-
-var (
-	// git revision
-	Revision = "unknown"
-
-	VersionCmd = &cobra.Command{
-		Use:   "version",
-		Short: "",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("%s %s\n", omnissmclient.Version, Revision)
-		},
-	}
-)
+package omnissmapi_test

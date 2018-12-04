@@ -19,6 +19,7 @@ import (
 	"io/ioutil"
 
 	"github.com/aws/aws-sdk-go/aws"
+	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
@@ -31,6 +32,7 @@ type Config struct {
 
 	AssumeRole string
 }
+
 type S3 struct {
 	s3iface.S3API
 
@@ -70,4 +72,11 @@ func (s *S3) GetObject(ctx context.Context, path string) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+func (s *S3) Client() *awsclient.Client {
+	if svc, ok := s.S3API.(*s3.S3); ok {
+		return svc.Client
+	}
+	return nil
 }

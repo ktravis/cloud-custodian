@@ -22,6 +22,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
@@ -30,6 +31,8 @@ import (
 
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
 )
+
+var ErrRegistrationNotFound = errors.New("instance registration not found")
 
 type RegistrationEntry struct {
 	Id         string    `json:"id,omitempty"`
@@ -56,6 +59,7 @@ type RegistrationsConfig struct {
 	*aws.Config
 
 	TableName string
+	TestDB    dynamodbiface.DynamoDBAPI
 }
 
 type Registrations struct {
@@ -66,10 +70,20 @@ type Registrations struct {
 
 func NewRegistrations(config *RegistrationsConfig) *Registrations {
 	r := &Registrations{
-		DynamoDBAPI: dynamodb.New(session.New(config.Config)),
+		DynamoDBAPI: config.TestDB,
 		config:      config,
 	}
+	if r.DynamoDBAPI == nil {
+		r.DynamoDBAPI = dynamodb.New(session.New(config.Config))
+	}
 	return r
+}
+
+func (r *Registrations) Client() *awsclient.Client {
+	if d, ok := r.DynamoDBAPI.(*dynamodb.DynamoDB); ok {
+		return d.Client
+	}
+	return nil
 }
 
 func (r *Registrations) queryIndex(ctx context.Context, indexName, attrName, value string) ([]*RegistrationEntry, error) {
@@ -121,36 +135,7 @@ func (r *Registrations) QueryIndexes(ctx context.Context, inputs ...QueryIndexIn
 	return entries, nil
 }
 
-func (r *Registrations) Scan(ctx context.Context) ([]*RegistrationEntry, error) {
-	input := &dynamodb.ScanInput{
-		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":v1": {BOOL: aws.Bool(false)},
-			":v2": {BOOL: aws.Bool(false)},
-		},
-		ConsistentRead:   aws.Bool(true),
-		FilterExpression: aws.String("IsTagged = :v1 or IsInventoried = :v2"),
-		TableName:        aws.String(r.config.TableName),
-	}
-	items := make([]map[string]*dynamodb.AttributeValue, 0)
-	err := r.DynamoDBAPI.ScanPagesWithContext(ctx, input, func(page *dynamodb.ScanOutput, lastPage bool) bool {
-		items = append(items, page.Items...)
-		return !lastPage
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "dynamodb.Scan failed")
-	}
-	entries := make([]*RegistrationEntry, 0)
-	for _, item := range items {
-		var entry RegistrationEntry
-		if err := dynamodbattribute.UnmarshalMap(item, &entry); err != nil {
-			return nil, err
-		}
-		entries = append(entries, &entry)
-	}
-	return entries, nil
-}
-
-func (r *Registrations) Get(ctx context.Context, id string) (*RegistrationEntry, error, bool) {
+func (r *Registrations) Get(ctx context.Context, id string) (*RegistrationEntry, error) {
 	resp, err := r.DynamoDBAPI.GetItemWithContext(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(r.config.TableName),
 		//AttributesToGet: aws.StringSlice([]string{"id", "ActivationId", "ActivationCode", "ManagedId"}),
@@ -159,22 +144,22 @@ func (r *Registrations) Get(ctx context.Context, id string) (*RegistrationEntry,
 	if err != nil {
 		if aerr, ok := err.(awserr.Error); ok {
 			if aerr.Code() == dynamodb.ErrCodeResourceNotFoundException {
-				return nil, nil, false
+				return nil, ErrRegistrationNotFound
 			}
 		}
-		return nil, errors.Wrap(err, "dynamodb.Get failed"), false
+		return nil, errors.Wrap(err, "dynamodb.Get failed")
 	}
 	if resp.Item == nil {
-		return nil, nil, false
+		return nil, ErrRegistrationNotFound
 	}
 	var entry RegistrationEntry
 	if err := dynamodbattribute.UnmarshalMap(resp.Item, &entry); err != nil {
-		return nil, errors.Wrap(err, "cannot unmarshal dynamodbattribute map"), false
+		return nil, errors.Wrap(err, "cannot unmarshal dynamodbattribute map")
 	}
-	return &entry, nil, true
+	return &entry, nil
 }
 
-func (r *Registrations) GetByManagedId(ctx context.Context, managedId string) (*RegistrationEntry, error, bool) {
+func (r *Registrations) GetByManagedId(ctx context.Context, managedId string) (*RegistrationEntry, error) {
 	resp, err := r.DynamoDBAPI.QueryWithContext(ctx, &dynamodb.QueryInput{
 		TableName: aws.String(r.config.TableName),
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
@@ -184,21 +169,16 @@ func (r *Registrations) GetByManagedId(ctx context.Context, managedId string) (*
 		KeyConditionExpression: aws.String("ManagedId = :v1"),
 	})
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			if aerr.Code() == dynamodb.ErrCodeResourceNotFoundException {
-				return nil, nil, false
-			}
-		}
-		return nil, errors.Wrap(err, "dynamodb.Get failed"), false
+		return nil, errors.Wrap(err, "GetByManagedId (dynamodb.Query) failed")
 	}
 	if len(resp.Items) == 0 {
-		return nil, nil, false
+		return nil, ErrRegistrationNotFound
 	}
 	var entry RegistrationEntry
 	if err := dynamodbattribute.UnmarshalMap(resp.Items[0], &entry); err != nil {
-		return nil, errors.Wrap(err, "cannot unmarshal dynamodbattribute map"), false
+		return nil, errors.Wrap(err, "cannot unmarshal dynamodbattribute map")
 	}
-	return &entry, nil, true
+	return &entry, nil
 }
 
 func (r *Registrations) Put(ctx context.Context, entry *RegistrationEntry) error {
@@ -232,5 +212,12 @@ func (r *Registrations) Delete(ctx context.Context, id string) error {
 		TableName: aws.String(r.config.TableName),
 		Key:       map[string]*dynamodb.AttributeValue{"id": {S: aws.String(id)}},
 	})
-	return errors.Wrapf(err, "unable to delete entry: %#v", id)
+	if err != nil {
+		// NOTE: we do not check for ResourceNotFound here because DeleteItem
+		// does not return it in the case that an item with the given key is not
+		// found in the table. However it does return ResourceNotFound if the
+		// table itself does not exist, so we should propagate it in that case.
+		return errors.Wrapf(err, "unable to delete entry: %#v", id)
+	}
+	return nil
 }

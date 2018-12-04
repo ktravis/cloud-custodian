@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/aws/aws-sdk-go/service/sqs/sqsiface"
@@ -56,6 +57,13 @@ func New(config *Config) (*SQS, error) {
 		s.config.QueueURL = *resp.QueueUrl
 	}
 	return s, nil
+}
+
+func (s *SQS) Client() *awsclient.Client {
+	if svc, ok := s.SQSAPI.(*sqs.SQS); ok {
+		return svc.Client
+	}
+	return nil
 }
 
 func (s *SQS) Send(ctx context.Context, m json.Marshaler) error {

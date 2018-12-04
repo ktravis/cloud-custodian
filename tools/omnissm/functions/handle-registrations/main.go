@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/lambda"
@@ -40,7 +41,7 @@ func (r *registrationHandler) RequestActivation(ctx context.Context, req *omniss
 	if err != nil {
 		return nil, err
 	}
-	if resp.Existing() {
+	if resp.Existing {
 		logger.Info().Interface("entry", resp).Msg("existing registration entry found")
 	} else {
 		logger.Info().Interface("entry", resp).Msg("new registration entry created")
@@ -55,13 +56,13 @@ func (r *registrationHandler) UpdateRegistration(ctx context.Context, req *omnis
 		return nil, lambda.BadRequestError{fmt.Sprintf("invalid managedId %#v", req.ManagedId)}
 	}
 	id := req.Identity().Hash()
-	entry, err, ok := r.OmniSSM.Registrations.Get(ctx, id)
+	entry, err := r.OmniSSM.Registrations.Get(ctx, id)
 	if err != nil {
+		if errors.Cause(err) == omnissm.ErrRegistrationNotFound {
+			logger.Info().Str("instanceName", req.Identity().Name()).Str("id", id).Msg("registration entry not found")
+			return nil, lambda.NotFoundError{fmt.Sprintf("entry not found: %#v", id)}
+		}
 		return nil, err
-	}
-	if !ok {
-		logger.Info().Str("instanceName", req.Identity().Name()).Str("id", id).Msg("registration entry not found")
-		return nil, lambda.NotFoundError{fmt.Sprintf("entry not found: %#v", id)}
 	}
 	logger.Info().Interface("entry", entry).Msg("registration entry found")
 	entry.ManagedId = req.ManagedId

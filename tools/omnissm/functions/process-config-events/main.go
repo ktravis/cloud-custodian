@@ -17,11 +17,9 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 
@@ -95,17 +93,10 @@ func handleConfigurationItemChange(ctx context.Context, detail configservice.Con
 			ManagedId: entry.ManagedId,
 			Tags:      tags,
 		}
-		err := omni.SSM.AddTagsToResource(ctx, resourceTags)
-		if err != nil {
-			if omni.SQS != nil && request.IsErrorThrottle(err) || request.IsErrorRetryable(err) {
-				sqsErr := omni.SQS.Send(ctx, &omnissm.DeferredActionMessage{
-					Type:  omnissm.AddTagsToResource,
-					Value: resourceTags,
-				})
-				if sqsErr != nil {
-					return sqsErr
-				}
-				return errors.Wrapf(err, "deferred action to SQS queue: %#v", omni.Config.QueueName)
+		if err := omni.TagInstance(ctx, resourceTags); err != nil {
+			if c := errors.Cause(err); c == omnissm.ErrRegistrationNotFound || c == ssm.ErrInvalidInstance {
+				log.Warn().Err(err).Msg("instance no longer exists")
+				return nil
 			}
 			return err
 		}
@@ -121,17 +112,10 @@ func handleConfigurationItemChange(ctx context.Context, detail configservice.Con
 			CaptureTime: removeTimestampMilliseconds(detail.ConfigurationItem.ConfigurationItemCaptureTime),
 			Content:     configservice.ConfigurationItemContentMap(detail.ConfigurationItem),
 		}
-		err = omni.SSM.PutInventory(ctx, inv)
-		if err != nil {
-			if omni.SQS != nil && request.IsErrorThrottle(err) || request.IsErrorRetryable(err) {
-				sqsErr := omni.SQS.Send(ctx, &omnissm.DeferredActionMessage{
-					Type:  omnissm.PutInventory,
-					Value: inv,
-				})
-				if sqsErr != nil {
-					return sqsErr
-				}
-				return errors.Wrapf(err, "deferred action to SQS queue: %#v", omni.Config.QueueName)
+		if err := omni.PutInstanceInventory(ctx, &inv); err != nil {
+			if c := errors.Cause(err); c == omnissm.ErrRegistrationNotFound || c == ssm.ErrInvalidInstance {
+				log.Warn().Err(err).Msg("instance no longer exists")
+				return nil
 			}
 			return err
 		}
@@ -162,6 +146,7 @@ func main() {
 		if event.Source != "aws.config" {
 			return
 		}
+		var eventDetail configservice.ConfigurationItemDetail
 		switch event.Detail.MessageType {
 		case "ConfigurationItemChangeNotification":
 			if _, ok := resourceTypes[event.Detail.ConfigurationItem.ResourceType]; !ok {
@@ -170,7 +155,7 @@ func main() {
 			if _, ok := resourceStatusTypes[event.Detail.ConfigurationItem.ConfigurationItemStatus]; !ok {
 				return
 			}
-			return handleConfigurationItemChange(ctx, event.Detail.ConfigurationItemDetail)
+			eventDetail = event.Detail.ConfigurationItemDetail
 		case "OversizedConfigurationItemChangeNotification":
 			if _, ok := resourceTypes[event.Detail.ConfigurationItemSummary.ResourceType]; !ok {
 				return
@@ -180,16 +165,14 @@ func main() {
 			}
 			data, err := omni.S3.GetObject(ctx, event.Detail.S3DeliverySummary.S3BucketLocation)
 			if err != nil {
-				return err
+				return errors.Wrap(err, "cannot download oversized configuration item")
 			}
-			var eventDetail configservice.ConfigurationItemDetail
 			if err := json.Unmarshal(data, &eventDetail); err != nil {
-				return err
+				return errors.Wrap(err, "cannot unmarshal oversized configuration item")
 			}
-			return handleConfigurationItemChange(ctx, eventDetail)
 		default:
-			err = fmt.Errorf("unknown message type: %#v", event.Detail.MessageType)
+			return errors.Errorf("unknown message type: %#v", event.Detail.MessageType)
 		}
-		return
+		return handleConfigurationItemChange(ctx, eventDetail)
 	})
 }

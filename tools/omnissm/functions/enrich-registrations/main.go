@@ -109,7 +109,7 @@ func main() {
 						tags["AccountId"] = ci.AWSAccountId
 						tags["VPCId"] = ci.Configuration.VPCId
 						tags["SubnetId"] = ci.Configuration.SubnetId
-						err := omni.SQS.Send(ctx, &omnissm.DeferredActionMessage{
+						err := omni.Queue.Send(ctx, &omnissm.DeferredActionMessage{
 							Type: omnissm.AddTagsToResource,
 							Value: &ssm.ResourceTags{
 								ManagedId: entry.ManagedId,
@@ -123,7 +123,7 @@ func main() {
 						}
 					}
 					if entry.IsInventoried == 0 {
-						err := omni.SQS.Send(ctx, &omnissm.DeferredActionMessage{
+						err := omni.Queue.Send(ctx, &omnissm.DeferredActionMessage{
 							Type: omnissm.PutInventory,
 							Value: &ssm.CustomInventory{
 								TypeName:    "Custom:CloudInfo",

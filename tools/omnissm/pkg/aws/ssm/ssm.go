@@ -22,12 +22,16 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
+	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ssm"
 	"github.com/aws/aws-sdk-go/service/ssm/ssmiface"
 	"github.com/golang/time/rate"
 	"github.com/pkg/errors"
 )
+
+var ErrInvalidInstance = errors.New("invalid instance id")
 
 type Config struct {
 	*aws.Config
@@ -49,6 +53,13 @@ func New(config *Config) *SSM {
 		ssmRate: rate.NewLimiter(5, 5),
 	}
 	return s
+}
+
+func (s *SSM) Client() *awsclient.Client {
+	if svc, ok := s.SSMAPI.(*ssm.SSM); ok {
+		return svc.Client
+	}
+	return nil
 }
 
 type Activation struct {
@@ -92,6 +103,13 @@ func (s *SSM) AddTagsToResource(ctx context.Context, input *ResourceTags) error 
 		ResourceId:   aws.String(input.ManagedId),
 		Tags:         awsTags,
 	})
+	if err != nil {
+		if awsErr, ok := err.(awserr.Error); ok {
+			if awsErr.Code() == "InvalidResourceId" {
+				err = ErrInvalidInstance
+			}
+		}
+	}
 	return errors.Wrapf(err, "ssm.AddTagsToResource failed: %#v", input.ManagedId)
 }
 
@@ -119,6 +137,13 @@ func (s *SSM) PutInventory(ctx context.Context, inv *CustomInventory) error {
 			TypeName:      aws.String(inv.TypeName),
 		}},
 	})
+	if err != nil {
+		if awsErr, ok := err.(awserr.Error); ok {
+			if awsErr.Code() == "InvalidResourceId" {
+				err = ErrInvalidInstance
+			}
+		}
+	}
 	return errors.Wrapf(err, "ssm.PutInventory failed: %#v", inv.ManagedId)
 }
 

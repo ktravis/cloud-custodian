@@ -1,5 +1,5 @@
 // +build windows
 
-package omnissm
+package omnissmclient
 
 const AmazonSSMAgentServiceName = "AmazonSSMAgent"

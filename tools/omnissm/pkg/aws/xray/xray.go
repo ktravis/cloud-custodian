@@ -12,24 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package xray
 
 import (
-	"fmt"
-
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm/omnissmclient"
-	"github.com/spf13/cobra"
+	"github.com/aws/aws-sdk-go/aws/client"
+	"github.com/aws/aws-xray-sdk-go/xray"
 )
 
-var (
-	// git revision
-	Revision = "unknown"
+type Service interface {
+	Client() *client.Client
+}
 
-	VersionCmd = &cobra.Command{
-		Use:   "version",
-		Short: "",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("%s %s\n", omnissmclient.Version, Revision)
-		},
+func EnableTracing(s Service) {
+	if c := s.Client(); c != nil {
+		xray.AWS(c)
 	}
-)
+}

@@ -12,6 +12,7 @@ github.com/aws/aws-sdk-go v1.15.23 h1:kOoboR2trlezdCoazZ0RXvJbM7YrOglDekarwdLP74
 github.com/aws/aws-sdk-go v1.15.23/go.mod h1:mFuSZ37Z9YOHbQEwBWztmVzqXrEkub65tZoCYDt7FT0=
 github.com/aws/aws-xray-sdk-go v1.0.0-rc.5 h1:7a0ES/UQniY+MWQ9TQd2rxzVbeTIFfX9lLGrM+UyNxI=
 github.com/aws/aws-xray-sdk-go v1.0.0-rc.5/go.mod h1:XtMKdBQfpVut+tJEwI7+dJFRxxRdxHDyVNp2tHXRq04=
+github.com/capitalone/cloud-custodian v0.8.13 h1:cC2RZbyD9m3RIa6x6PX65XbbdtqXcR0JiK3Zifn5/YU=
 github.com/cihub/seelog v0.0.0-20170130134532-f561c5e57575 h1:kHaBemcxl8o/pQ5VM1c8PVE1PubbNx3mjUr09OqWGCs=
 github.com/cihub/seelog v0.0.0-20170130134532-f561c5e57575/go.mod h1:9d6lWj8KzO/fd/NrVaLscBKmPigpZpn5YawRPw+e3Yo=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
