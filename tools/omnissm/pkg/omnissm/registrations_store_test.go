@@ -138,6 +138,9 @@ func (db *mockDynamoDB) UpdateItemWithContext(ctx aws.Context, input *dynamodb.U
 }
 
 func (db *mockDynamoDB) DeleteItemWithContext(ctx aws.Context, input *dynamodb.DeleteItemInput, o ...request.Option) (*dynamodb.DeleteItemOutput, error) {
+	if aws.StringValue(input.TableName) == "test-not-found" {
+		return nil, awserr.New(dynamodb.ErrCodeResourceNotFoundException, "", errors.New("dummy"))
+	}
 	db.checkTable(input.TableName)
 
 	delete(db.items, aws.StringValue(input.Key["id"].S))
@@ -671,5 +674,31 @@ func TestRegistrationsDelete(t *testing.T) {
 	}
 	if d := cmp.Diff(&input[2], entry); d != "" {
 		t.Errorf("response entry does not match: %v", d)
+	}
+
+	// deleting an item that does not exist should not raise an error
+	if err := r.Delete(context.Background(), "fake-entry"); err != nil {
+		t.Errorf("unexpected error while deleting entry that does not exist: %v", err)
+	}
+}
+
+func TestRegistrationsDeleteResourceNotFound(t *testing.T) {
+	r, m := newWithMock(t, "test-not-found")
+	_, err := m.DeleteItemWithContext(context.Background(), &dynamodb.DeleteItemInput{
+		TableName: aws.String(m.expectedTableName),
+		Key:       nil,
+	})
+	// sanity check to ensure that the test case/mock is still correct
+	if err == nil {
+		panic("DeleteWithContext for nonexistent table test did not return an error")
+	} else if aErr, ok := errors.Cause(err).(awserr.Error); !ok || aErr.Code() != dynamodb.ErrCodeResourceNotFoundException {
+		panic("DeleteWithContext for nonexistent table returned unexpected error: " + err.Error())
+	}
+
+	// actual test
+	if err := r.Delete(context.Background(), "any-id"); err == nil {
+		t.Errorf("Delete did not return an error for nonexistent table")
+	} else if aErr, ok := errors.Cause(err).(awserr.Error); !ok || aErr.Code() != dynamodb.ErrCodeResourceNotFoundException {
+		t.Errorf("Delete for nonexistent table did not return expected ResourceNotFoundException, instead returned: %v", err)
 	}
 }
