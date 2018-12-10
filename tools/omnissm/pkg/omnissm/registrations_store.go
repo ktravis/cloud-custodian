@@ -17,7 +17,6 @@ package omnissm
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -193,18 +192,35 @@ func (r *Registrations) Put(ctx context.Context, entry *RegistrationEntry) error
 	return err
 }
 
-func (r *Registrations) Update(ctx context.Context, entry *RegistrationEntry) error {
+func bton(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+func (r *Registrations) setField(ctx context.Context, id, field string, v *dynamodb.AttributeValue) error {
 	_, err := r.DynamoDBAPI.UpdateItemWithContext(ctx, &dynamodb.UpdateItemInput{
-		TableName:        aws.String(r.config.TableName),
-		Key:              map[string]*dynamodb.AttributeValue{"id": {S: aws.String(entry.Id)}},
-		UpdateExpression: aws.String("SET ManagedId=:v1, IsTagged=:v2, IsInventoried=:v3"),
-		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":v1": {S: aws.String(entry.ManagedId)},
-			":v2": {N: aws.String(strconv.Itoa(entry.IsTagged))},
-			":v3": {N: aws.String(strconv.Itoa(entry.IsInventoried))},
+		TableName: aws.String(r.config.TableName),
+		Key: map[string]*dynamodb.AttributeValue{
+			"id": {S: aws.String(id)},
 		},
+		UpdateExpression:          aws.String(fmt.Sprintf("SET %s=:v1", field)),
+		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{":v1": v},
 	})
-	return errors.Wrapf(err, "unable to update entry: %#v", entry.Id)
+	return errors.Wrapf(err, "unable to update entry %#v field %#v", id, field)
+}
+
+func (r *Registrations) SetManagedId(ctx context.Context, id, mid string) error {
+	return r.setField(ctx, id, "ManagedId", &dynamodb.AttributeValue{S: aws.String(mid)})
+}
+
+func (r *Registrations) SetTagged(ctx context.Context, id string, b bool) error {
+	return r.setField(ctx, id, "IsTagged", &dynamodb.AttributeValue{N: aws.String(bton(b))})
+}
+
+func (r *Registrations) SetInventoried(ctx context.Context, id string, b bool) error {
+	return r.setField(ctx, id, "IsInventoried", &dynamodb.AttributeValue{N: aws.String(bton(b))})
 }
 
 func (r *Registrations) Delete(ctx context.Context, id string) error {

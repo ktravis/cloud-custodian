@@ -178,8 +178,7 @@ func (o *API) TagInstance(ctx context.Context, tags *ssm.ResourceTags) error {
 	if err := o.SSM.AddTagsToResource(ctx, tags); err != nil {
 		return o.tryDefer(ctx, err, AddTagsToResource, tags)
 	}
-	entry.IsTagged = 1
-	if err := o.Registrations.Update(ctx, entry); err != nil {
+	if err := o.Registrations.SetTagged(ctx, entry.Id, true); err != nil {
 		return errors.Wrap(err, "failed to update registration table with tagged flag")
 	}
 	return nil
@@ -196,11 +195,7 @@ func (o *API) PutInstanceInventory(ctx context.Context, inv *ssm.CustomInventory
 	if err := o.SSM.PutInventory(ctx, inv); err != nil {
 		return o.tryDefer(ctx, err, PutInventory, inv)
 	}
-	entry.IsInventoried = 1
-	if err := o.Registrations.Update(ctx, entry); err != nil {
-		return err
-	}
-	return nil
+	return o.Registrations.SetInventoried(ctx, entry.Id, true)
 }
 
 func (o *API) tryDefer(ctx context.Context, err error, t DeferredActionType, value interface{}) error {

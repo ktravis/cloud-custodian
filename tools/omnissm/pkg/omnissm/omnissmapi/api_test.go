@@ -13,3 +13,31 @@
 // limitations under the License.
 
 package omnissmapi_test
+
+import (
+	"context"
+	"encoding/json"
+)
+
+type mockQueue struct {
+	sent []json.Marshaler
+	err  error
+}
+
+func (q *mockQueue) Send(ctx context.Context, m json.Marshaler) error {
+	if q.err != nil {
+		return q.err
+	}
+	q.sent = append(q.sent, m)
+	return nil
+}
+
+func (q *mockQueue) Pop() json.Marshaler {
+	n := len(q.sent)
+	if n == 0 {
+		return nil
+	}
+	m := q.sent[n-1]
+	q.sent = q.sent[:n-1]
+	return m
+}

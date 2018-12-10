@@ -275,57 +275,51 @@ func TestRegistrationsGet(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		if c.entry == nil {
-			continue
-		}
-		item, err := dynamodbattribute.MarshalMap(c.entry)
-		if err != nil {
-			t.Errorf("%s - %v", c.name, err)
-			continue
-		}
-		m.items[c.id] = item
-	}
-
-	for _, c := range cases {
-		{
-			resp, err := r.Get(context.Background(), c.id)
-			if c.entry == nil {
-				if resp != nil {
-					t.Errorf("%s - expected resp to be nil, got %v", c.name, resp)
-				} else if errors.Cause(err) != omnissm.ErrRegistrationNotFound {
-					t.Errorf("%s - expected ErrRegistrationNotFound, got %v", c.name, err)
+		t.Run(c.name, func(t *testing.T) {
+			if c.entry != nil {
+				item, err := dynamodbattribute.MarshalMap(c.entry)
+				if err != nil {
+					t.Fatal(err)
 				}
-				continue
+				m.items[c.id] = item
 			}
-			if err != nil {
-				t.Errorf("%s - %v", c.name, err)
-				continue
-			}
-			if d := cmp.Diff(resp, c.entry); d != "" {
-				t.Errorf("%s - response entry does not match: %v", c.name, d)
-			}
-		}
-	}
 
-	for _, c := range cases {
-		{
-			resp, err := r.GetByManagedId(context.Background(), c.mid)
-			if c.entry == nil {
-				if resp != nil {
-					t.Errorf("%s - expected resp to be nil, got %v", c.name, resp)
-				} else if errors.Cause(err) != omnissm.ErrRegistrationNotFound {
-					t.Errorf("%s - expected ErrRegistrationNotFound, got %v", c.name, err)
+			{
+				resp, err := r.Get(context.Background(), c.id)
+				if c.entry == nil {
+					if resp != nil {
+						t.Errorf("expected resp to be nil, got %v", resp)
+					} else if errors.Cause(err) != omnissm.ErrRegistrationNotFound {
+						t.Errorf("expected ErrRegistrationNotFound, got %v", err)
+					}
+					return
 				}
-				continue
+				if err != nil {
+					t.Fatal(err)
+				}
+				if d := cmp.Diff(resp, c.entry); d != "" {
+					t.Errorf("response entry does not match: %v", d)
+				}
 			}
-			if err != nil {
-				t.Errorf("%s - %v", c.name, err)
-				continue
+
+			{
+				resp, err := r.GetByManagedId(context.Background(), c.mid)
+				if c.entry == nil {
+					if resp != nil {
+						t.Errorf("expected resp to be nil, got %v", resp)
+					} else if errors.Cause(err) != omnissm.ErrRegistrationNotFound {
+						t.Errorf("expected ErrRegistrationNotFound, got %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if d := cmp.Diff(resp, c.entry); d != "" {
+					t.Errorf("response entry does not match: %v", d)
+				}
 			}
-			if d := cmp.Diff(resp, c.entry); d != "" {
-				t.Errorf("%s - response entry does not match: %v", c.name, d)
-			}
-		}
+		})
 	}
 }
 
@@ -366,16 +360,18 @@ func TestRegistrationsPut(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		if err := r.Put(context.Background(), &c.entry); err != nil {
-			t.Error(err)
-		}
-		saved, ok := m.items[c.entry.Id]
-		if !ok {
-			t.Errorf("%s - item not added to mock dynamodb", c.name)
-		}
-		if err := checkEntry(&c.entry, saved); err != nil {
-			t.Errorf("%s - %v", c.name, err)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			if err := r.Put(context.Background(), &c.entry); err != nil {
+				t.Error(err)
+			}
+			saved, ok := m.items[c.entry.Id]
+			if !ok {
+				t.Errorf("item not added to mock dynamodb")
+			}
+			if err := checkEntry(&c.entry, saved); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 }
 
@@ -421,8 +417,7 @@ func TestRegistrationsQueryIndexes(t *testing.T) {
 	for _, c := range input {
 		item, err := dynamodbattribute.MarshalMap(c.entry)
 		if err != nil {
-			t.Errorf("%s - %v", c.name, err)
-			continue
+			panic(err)
 		}
 		m.items[c.entry.Id] = item
 	}
@@ -479,17 +474,18 @@ func TestRegistrationsQueryIndexes(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		entries, err := r.QueryIndexes(context.Background(), c.options...)
-		if err != nil {
-			t.Errorf("%s - QueryIndexes failed: %v", c.name, err)
-			continue
-		}
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].Id < entries[j].Id
+		t.Run(c.name, func(t *testing.T) {
+			entries, err := r.QueryIndexes(context.Background(), c.options...)
+			if err != nil {
+				t.Fatalf("QueryIndexes failed: %v", err)
+			}
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].Id < entries[j].Id
+			})
+			if d := cmp.Diff(entries, c.expected); d != "" {
+				t.Errorf("response entries do not match: %v", d)
+			}
 		})
-		if d := cmp.Diff(entries, c.expected); d != "" {
-			t.Errorf("%s - response entries do not match: %v", c.name, d)
-		}
 	}
 
 }
@@ -498,14 +494,16 @@ func TestRegistrationsUpdate(t *testing.T) {
 	r, m := newWithMock(t, "test-table")
 
 	cases := []struct {
-		name     string
-		existing *omnissm.RegistrationEntry
-		updated  *omnissm.RegistrationEntry
-		expected *omnissm.RegistrationEntry
+		name                string
+		existing            *omnissm.RegistrationEntry
+		id, mid             string
+		tagged, inventoried bool
+		expected            *omnissm.RegistrationEntry
 	}{
 		{
 			name: "not existing",
-			updated: &omnissm.RegistrationEntry{
+			mid:  "mi-1",
+			expected: &omnissm.RegistrationEntry{
 				Id:        "1",
 				ManagedId: "mi-1",
 			},
@@ -515,9 +513,11 @@ func TestRegistrationsUpdate(t *testing.T) {
 			existing: &omnissm.RegistrationEntry{
 				Id: "2",
 			},
-			updated: &omnissm.RegistrationEntry{
+			mid:    "mi-2",
+			tagged: true,
+			expected: &omnissm.RegistrationEntry{
 				Id:        "2",
-				ManagedId: "mi-1",
+				ManagedId: "mi-2",
 				IsTagged:  1,
 			},
 		},
@@ -526,7 +526,9 @@ func TestRegistrationsUpdate(t *testing.T) {
 			existing: &omnissm.RegistrationEntry{
 				Id: "3",
 			},
-			updated: &omnissm.RegistrationEntry{
+			tagged:      true,
+			inventoried: true,
+			expected: &omnissm.RegistrationEntry{
 				Id:            "3",
 				IsTagged:      1,
 				IsInventoried: 1,
@@ -539,74 +541,69 @@ func TestRegistrationsUpdate(t *testing.T) {
 				ClientVersion: "1",
 				IsTagged:      1,
 			},
-			updated: &omnissm.RegistrationEntry{
-				Id:            "4",
-				IsInventoried: 1,
-			},
+			tagged:      false,
+			inventoried: true,
 			expected: &omnissm.RegistrationEntry{
 				Id:            "4",
 				ClientVersion: "1",
-				// NOTE: field is overriden by zero value in request
 				IsTagged:      0,
 				IsInventoried: 1,
 			},
 		},
-		{
-			name: "don't update extraneous fields",
-			existing: &omnissm.RegistrationEntry{
-				Id:            "5",
-				ClientVersion: "1",
-			},
-			updated: &omnissm.RegistrationEntry{
-				Id:            "5",
-				ManagedId:     "mi-2",
-				IsTagged:      1,
-				IsInventoried: 1,
-				ClientVersion: "2",
-				Region:        "us-west-1",
-			},
-			expected: &omnissm.RegistrationEntry{
-				Id:            "5",
-				ManagedId:     "mi-2",
-				ClientVersion: "1",
-				IsTagged:      1,
-				IsInventoried: 1,
-			},
-		},
 	}
 
 	for _, c := range cases {
-		if c.existing == nil {
-			continue
-		}
-		if c.existing.Id != c.updated.Id {
-			panic(fmt.Sprintf("misconfigured test case %#v: Id fields do not match", c.name))
-		}
-		item, err := dynamodbattribute.MarshalMap(c.existing)
-		if err != nil {
-			t.Errorf("unexpected error while marshaling input - %v", err)
-			continue
-		}
-		m.items[c.existing.Id] = item
-	}
+		t.Run(c.name, func(t *testing.T) {
+			if c.existing != nil {
+				if c.existing.Id != c.expected.Id {
+					t.Fatal("misconfigured test case: Id fields do not match")
+				}
+				item, err := dynamodbattribute.MarshalMap(c.existing)
+				if err != nil {
+					t.Fatalf("unexpected error while marshaling input - %v", err)
+				}
+				m.items[c.existing.Id] = item
+			}
 
-	for _, c := range cases {
-		if err := r.Update(context.Background(), c.updated); err != nil {
-			t.Errorf("%s - unexpected error during Update: %v", c.name, err)
-		}
-		entry, err := r.Get(context.Background(), c.updated.Id)
-		if err != nil {
-			t.Errorf("%s - unexpected error during Get: %v", c.name, err)
-		}
+			ex := c.existing
+			if ex == nil {
+				ex = c.expected
+			}
+			id := c.id
+			if c.id == "" {
+				id = ex.Id
+			}
+			if c.mid != ex.ManagedId {
+				if err := r.SetManagedId(context.Background(), id, c.mid); err != nil {
+					t.Errorf("SetManagedId: %v", err)
+				}
+			}
+			if c.tagged != (ex.IsTagged == 1) {
+				if err := r.SetTagged(context.Background(), id, c.tagged); err != nil {
+					t.Errorf("SetTagged: %v", err)
+				}
+			}
+			if c.inventoried != (ex.IsInventoried == 1) {
+				if err := r.SetInventoried(context.Background(), id, c.inventoried); err != nil {
+					t.Errorf("SetInventoried: %v", err)
+				}
+			}
+			entry, err := r.Get(context.Background(), id)
+			if c.existing == nil {
+				// Set* should not create new entries in the registration table
+				if errors.Cause(err) != omnissm.ErrRegistrationNotFound {
+					t.Errorf("expected Get to return ErrRegistrationNotFound, got: %v %v", entry, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("Get: %v", err)
+			}
 
-		expected := c.expected
-		if expected == nil {
-			expected = c.updated
-		}
-
-		if d := cmp.Diff(expected, entry); d != "" {
-			t.Errorf("%s - response entries do not match: %v", c.name, d)
-		}
+			if d := cmp.Diff(c.expected, entry); d != "" {
+				t.Errorf("response entries do not match: %v", d)
+			}
+		})
 	}
 }
 
