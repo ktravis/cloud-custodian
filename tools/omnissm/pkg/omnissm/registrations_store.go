@@ -26,6 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
+	"github.com/aws/aws-xray-sdk-go/xray"
 	"github.com/pkg/errors"
 
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
@@ -57,8 +58,9 @@ type RegistrationEntry struct {
 type RegistrationsConfig struct {
 	*aws.Config
 
-	TableName string
-	TestDB    dynamodbiface.DynamoDBAPI
+	TableName     string
+	TestDB        dynamodbiface.DynamoDBAPI
+	EnableTracing bool
 }
 
 type Registrations struct {
@@ -73,7 +75,11 @@ func NewRegistrations(config *RegistrationsConfig) *Registrations {
 		config:      config,
 	}
 	if r.DynamoDBAPI == nil {
-		r.DynamoDBAPI = dynamodb.New(session.New(config.Config))
+		svc := dynamodb.New(session.New(config.Config))
+		if config.EnableTracing {
+			xray.AWS(svc.Client)
+		}
+		r.DynamoDBAPI = svc
 	}
 	return r
 }
