@@ -23,10 +23,10 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
-	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ssm"
 	"github.com/aws/aws-sdk-go/service/ssm/ssmiface"
+	"github.com/aws/aws-xray-sdk-go/xray"
 	"github.com/golang/time/rate"
 	"github.com/pkg/errors"
 )
@@ -36,7 +36,8 @@ var ErrInvalidInstance = errors.New("invalid instance id")
 type Config struct {
 	*aws.Config
 
-	InstanceRole string
+	InstanceRole  string
+	EnableTracing bool
 }
 
 type SSM struct {
@@ -47,19 +48,16 @@ type SSM struct {
 }
 
 func New(config *Config) *SSM {
+	svc := ssm.New(session.New(config.Config))
+	if config.EnableTracing {
+		xray.AWS(svc.Client)
+	}
 	s := &SSM{
-		SSMAPI:  ssm.New(session.New(config.Config)),
+		SSMAPI:  svc,
 		config:  config,
 		ssmRate: rate.NewLimiter(5, 5),
 	}
 	return s
-}
-
-func (s *SSM) Client() *awsclient.Client {
-	if svc, ok := s.SSMAPI.(*ssm.SSM); ok {
-		return svc.Client
-	}
-	return nil
 }
 
 type Activation struct {
@@ -68,7 +66,7 @@ type Activation struct {
 }
 
 func (s *SSM) CreateActivation(ctx context.Context, name string) (*Activation, error) {
-	s.ssmRate.Wait(context.TODO())
+	s.ssmRate.Wait(ctx)
 	resp, err := s.SSMAPI.CreateActivationWithContext(ctx, &ssm.CreateActivationInput{
 		DefaultInstanceName: aws.String(name),
 		IamRole:             aws.String(s.config.InstanceRole),
@@ -148,10 +146,14 @@ func (s *SSM) PutInventory(ctx context.Context, inv *CustomInventory) error {
 }
 
 func (s *SSM) DeregisterManagedInstance(ctx context.Context, managedId string) error {
-	s.ssmRate.Wait(context.TODO())
+	s.ssmRate.Wait(ctx)
 	_, err := s.SSMAPI.DeregisterManagedInstanceWithContext(ctx, &ssm.DeregisterManagedInstanceInput{
 		InstanceId: aws.String(managedId),
 	})
+	if aErr, ok := err.(awserr.Error); ok && aErr.Code() == "InvalidInstanceId" {
+		// SSM no longer knows about the instance, but dynamodb does - continue
+		err = ErrInvalidInstance
+	}
 	return errors.Wrapf(err, "ssm.DeregisterManagedInstance failed: %#v", managedId)
 }
 

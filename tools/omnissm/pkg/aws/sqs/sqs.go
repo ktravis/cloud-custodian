@@ -21,10 +21,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/aws/aws-sdk-go/service/sqs/sqsiface"
+	"github.com/aws/aws-xray-sdk-go/xray"
 	"github.com/pkg/errors"
 )
 
@@ -34,6 +34,7 @@ type Config struct {
 	MessageGroupId string
 	QueueName      string
 	QueueURL       string
+	EnableTracing  bool
 }
 
 type SQS struct {
@@ -43,8 +44,12 @@ type SQS struct {
 }
 
 func New(config *Config) (*SQS, error) {
+	svc := sqs.New(session.New(config.Config))
+	if config.EnableTracing {
+		xray.AWS(svc.Client)
+	}
 	s := &SQS{
-		SQSAPI: sqs.New(session.New(config.Config)),
+		SQSAPI: svc,
 		config: config,
 	}
 	if s.config.QueueURL == "" {
@@ -57,13 +62,6 @@ func New(config *Config) (*SQS, error) {
 		s.config.QueueURL = *resp.QueueUrl
 	}
 	return s, nil
-}
-
-func (s *SQS) Client() *awsclient.Client {
-	if svc, ok := s.SQSAPI.(*sqs.SQS); ok {
-		return svc.Client
-	}
-	return nil
 }
 
 func (s *SQS) Send(ctx context.Context, m json.Marshaler) error {

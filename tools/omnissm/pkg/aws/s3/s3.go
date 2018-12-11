@@ -19,18 +19,19 @@ import (
 	"io/ioutil"
 
 	"github.com/aws/aws-sdk-go/aws"
-	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3iface"
+	"github.com/aws/aws-xray-sdk-go/xray"
 	"github.com/golang/time/rate"
 )
 
 type Config struct {
 	*aws.Config
 
-	AssumeRole string
+	AssumeRole    string
+	EnableTracing bool
 }
 
 type S3 struct {
@@ -45,8 +46,12 @@ func New(config *Config) *S3 {
 	if config.AssumeRole != "" {
 		config.Config.WithCredentials(stscreds.NewCredentials(sess, config.AssumeRole))
 	}
+	svc := s3.New(session.New(config.Config))
+	if config.EnableTracing {
+		xray.AWS(svc.Client)
+	}
 	s := &S3{
-		S3API:   s3.New(session.New(config.Config)),
+		S3API:   svc,
 		config:  config,
 		getRate: rate.NewLimiter(300, 300),
 	}
@@ -72,11 +77,4 @@ func (s *S3) GetObject(ctx context.Context, path string) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
-}
-
-func (s *S3) Client() *awsclient.Client {
-	if svc, ok := s.S3API.(*s3.S3); ok {
-		return svc.Client
-	}
-	return nil
 }

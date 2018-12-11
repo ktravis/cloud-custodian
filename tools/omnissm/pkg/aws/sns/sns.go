@@ -18,11 +18,11 @@ import (
 	"context"
 
 	"github.com/aws/aws-sdk-go/aws"
-	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/aws/aws-sdk-go/service/sns/snsiface"
+	"github.com/aws/aws-xray-sdk-go/xray"
 	"github.com/golang/time/rate"
 	"github.com/pkg/errors"
 )
@@ -30,7 +30,8 @@ import (
 type Config struct {
 	*aws.Config
 
-	AssumeRole string
+	AssumeRole    string
+	EnableTracing bool
 }
 
 type SNS struct {
@@ -45,8 +46,12 @@ func New(config *Config) *SNS {
 	if config.AssumeRole != "" {
 		config.Config.WithCredentials(stscreds.NewCredentials(sess, config.AssumeRole))
 	}
+	svc := sns.New(session.New(config.Config))
+	if config.EnableTracing {
+		xray.AWS(svc.Client)
+	}
 	s := &SNS{
-		SNSAPI:  sns.New(session.New(config.Config)),
+		SNSAPI:  svc,
 		config:  config,
 		snsRate: rate.NewLimiter(300, 300),
 	}
@@ -60,11 +65,4 @@ func (s *SNS) Publish(ctx context.Context, topicArn string, msg []byte) error {
 	})
 	return errors.Wrap(err, "sns.Publish")
 
-}
-
-func (s *SNS) Client() *awsclient.Client {
-	if svc, ok := s.SNSAPI.(*sns.SNS); ok {
-		return svc.Client
-	}
-	return nil
 }
