@@ -16,6 +16,7 @@ package omnissmapi
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/pkg/errors"
 )
@@ -28,9 +29,24 @@ const (
 	RequestActivation
 	DeregisterInstance
 	PutInventory
-	PutRegistrationEntry
-	DeleteRegistrationEntry
 )
+
+func (t DeferredActionType) String() string {
+	switch t {
+	case AddTagsToResource:
+		return "AddTagsToResource"
+	case RequestActivation:
+		return "RequestActivation"
+	case DeregisterInstance:
+		return "DeregisterInstance"
+	case PutInventory:
+		return "PutInventory"
+	case InvalidActionType:
+		fallthrough
+	default:
+		return fmt.Sprintf("INVALID(%d)", t)
+	}
+}
 
 type DeferredActionMessage struct {
 	Type  DeferredActionType

@@ -90,30 +90,6 @@ func processDeferredActionMessage(ctx context.Context, msg message) error {
 			return err
 		}
 		log.Info().Msg("custom inventory successful")
-	case omnissm.PutRegistrationEntry:
-		var entry omnissm.RegistrationEntry
-		if err := json.Unmarshal(msg.Value, &entry); err != nil {
-			return errors.Wrap(err, "cannot unmarshal DeferredActionMessage.Value")
-		}
-		if err := omni.Registrations.Put(ctx, &entry); err != nil {
-			return err
-		}
-		log.Info().Interface("entry", entry).Msg("new registration entry created")
-	case omnissm.DeleteRegistrationEntry:
-		var entry omnissm.RegistrationEntry
-		if err := json.Unmarshal(msg.Value, &entry); err != nil {
-			if err := json.Unmarshal(msg.Value, &entry.Id); err != nil {
-				return errors.Wrap(err, "cannot unmarshal DeferredActionMessage.Value")
-			}
-		}
-		if err := omni.DeleteRegistration(ctx, &entry); err != nil {
-			if errors.Cause(err) == omnissm.ErrRegistrationNotFound {
-				log.Warn().Err(err).Str("Id", id).Msg("instance no longer exists")
-				return nil
-			}
-			return err
-		}
-		log.Info().Msgf("Successfully deleted registration entry: %#v", id)
 	default:
 	}
 	return nil
