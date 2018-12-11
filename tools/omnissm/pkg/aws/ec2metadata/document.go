@@ -15,12 +15,9 @@
 package ec2metadata
 
 import (
-	"crypto/sha1"
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"net/http"
-	"strings"
 
 	"github.com/rs/zerolog/log"
 )
@@ -33,17 +30,6 @@ type Document struct {
 	InstanceId       string `json:"instanceId"`
 	AccountId        string `json:"accountId"`
 	InstanceType     string `json:"instanceType"`
-	ImageId          string `json:"imageId"`
-}
-
-// Name returns the logical name for the instance described in the identity
-// document and is the value used when deriving the unique identifier hash.
-func (d *Document) Name() string {
-	return fmt.Sprintf("%s-%s", d.AccountId, d.InstanceId)
-}
-
-func (d *Document) Hash() string {
-	return strings.ToUpper(fmt.Sprintf("%x", sha1.Sum([]byte(d.Name()))))
 }
 
 const (

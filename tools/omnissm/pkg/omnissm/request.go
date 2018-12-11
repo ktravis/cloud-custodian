@@ -14,44 +14,10 @@
 
 package omnissm
 
-import (
-	"encoding/json"
-
-	"github.com/pkg/errors"
-
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ec2metadata"
-)
-
+// TODO: factor out dependency on ec2metadata from this package
 type RegistrationRequest struct {
-	Provider      string `json:"provider"`
-	Document      string `json:"document"`
-	Signature     string `json:"signature"`
 	ManagedId     string `json:"managedId,omitempty"`
 	ClientVersion string `json:"clientVersion,omitempty"`
 
-	document ec2metadata.Document
-}
-
-func (r *RegistrationRequest) UnmarshalJSON(data []byte) error {
-	type alias RegistrationRequest
-	var req alias
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-	*r = RegistrationRequest(req)
-	return nil
-}
-
-func (r *RegistrationRequest) Identity() *ec2metadata.Document {
-	return &r.document
-}
-
-func (r *RegistrationRequest) Verify() error {
-	if err := ec2metadata.Verify([]byte(r.Document), r.Signature); err != nil {
-		return err
-	}
-	if err := json.Unmarshal([]byte(r.Document), &r.document); err != nil {
-		return errors.Wrap(err, "cannot unmarshal identity document")
-	}
-	return nil
+	SecureIdentity
 }

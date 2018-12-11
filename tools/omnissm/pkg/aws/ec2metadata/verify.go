@@ -23,6 +23,8 @@ import (
 )
 
 const (
+	AWSIdentitySignatureAlgorithm = x509.SHA256WithRSA
+
 	// AWSRSAIdentityCert is the RSA public certificate
 	AWSRSAIdentityCert = `-----BEGIN CERTIFICATE-----
 MIIDIjCCAougAwIBAgIJAKnL4UEDMN/FMA0GCSqGSIb3DQEBBQUAMGoxCzAJBgNV
@@ -46,14 +48,14 @@ C1haGgSI/A1uZUKs/Zfnph0oEI0/hu1IIJ/SKBDtN5lvmZ/IzbOPIJWirlsllQIQ
 )
 
 var (
-	// RSACert AWS Public Certificate
-	RSACert *x509.Certificate
+	// PublicIdentityCert AWS Public Certificate
+	AWSIdentityCert *x509.Certificate
 )
 
 func init() {
 	block, _ := pem.Decode([]byte(AWSRSAIdentityCert))
 	var err error
-	RSACert, err = x509.ParseCertificate(block.Bytes)
+	AWSIdentityCert, err = x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		panic(err)
 	}
@@ -64,7 +66,7 @@ func Verify(doc []byte, signature string) error {
 	if err != nil {
 		return errors.Wrap(err, "malformed RSA signature")
 	}
-	if err := RSACert.CheckSignature(x509.SHA256WithRSA, doc, sig); err != nil {
+	if err := AWSIdentityCert.CheckSignature(AWSIdentitySignatureAlgorithm, doc, sig); err != nil {
 		return errors.Wrap(err, "invalid identity")
 	}
 	return nil

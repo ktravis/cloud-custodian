@@ -22,82 +22,92 @@ import (
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/pkg/errors"
 
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/s3"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/sns"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/sqs"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/xray"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm"
 )
 
-type Queue interface {
+type ssmAPI interface {
+	CreateActivation(context.Context, string) (*ssm.Activation, error)
+	AddTagsToResource(context.Context, *ssm.ResourceTags) error
+	PutInventory(context.Context, *ssm.CustomInventory) error
+	DeregisterManagedInstance(context.Context, string) error
+}
+
+type notifier interface {
+	Publish(context.Context, string, []byte) error
+}
+
+type deferQueue interface {
 	Send(context.Context, json.Marshaler) error
 }
 
-type API struct {
-	*Config
-	*omnissm.Registrations
-	*s3.S3
-	*sns.SNS
-	*ssm.SSM
-
-	DeferQueue Queue
+type registry interface {
+	Get(context.Context, string) (*omnissm.RegistrationEntry, error)
+	GetByManagedId(context.Context, string) (*omnissm.RegistrationEntry, error)
+	Put(context.Context, *omnissm.RegistrationEntry) error
+	Delete(context.Context, string) error
+	SetTagged(context.Context, string, bool) error
+	SetInventoried(context.Context, string, bool) error
 }
 
-func New(config *Config) (*API, error) {
-	o := &API{
-		Config: config,
-		Registrations: omnissm.NewRegistrations(&omnissm.RegistrationsConfig{
-			Config:    config.Config,
-			TableName: config.RegistrationsTable,
+// TODO: merge ssmAPI into registry? store(s)+activation provider+control plane?
+type OmniSSM struct {
+	config *Config
+
+	ssmAPI
+	notifier
+	deferQueue
+	registry
+}
+
+func New(config *Config) (*OmniSSM, error) {
+	o := &OmniSSM{
+		config: config,
+		registry: omnissm.NewRegistrations(&omnissm.RegistrationsConfig{
+			Config:        config.Config,
+			TableName:     config.RegistrationsTable,
+			EnableTracing: config.XRayTracingEnabled != "",
 		}),
-		SNS: sns.New(&sns.Config{
-			Config:     config.Config,
-			AssumeRole: config.S3DownloadRole,
+		notifier: sns.New(&sns.Config{
+			Config:        config.Config,
+			AssumeRole:    config.SNSPublishRole,
+			EnableTracing: config.XRayTracingEnabled != "",
 		}),
-		SSM: ssm.New(&ssm.Config{
-			Config:       config.Config,
-			InstanceRole: config.InstanceRole,
-		}),
-		S3: s3.New(&s3.Config{
-			Config:     config.Config,
-			AssumeRole: config.S3DownloadRole,
+		ssmAPI: ssm.New(&ssm.Config{
+			Config:        config.Config,
+			InstanceRole:  config.InstanceRole,
+			EnableTracing: config.XRayTracingEnabled != "",
 		}),
 	}
 	if config.QueueName != "" {
-		q, err := sqs.New(&sqs.Config{
+		var err error
+		o.deferQueue, err = sqs.New(&sqs.Config{
 			Config:         config.Config,
 			MessageGroupId: "omnissm-event-stream",
 			QueueName:      config.QueueName,
+			EnableTracing:  config.XRayTracingEnabled != "",
 		})
-
 		if err != nil {
 			return nil, errors.Wrap(err, "cannot initialize SQS")
 		}
-		if config.XRayTracingEnabled != "" {
-			xray.EnableTracing(q)
-		}
-		o.DeferQueue = q
-	}
-
-	if config.XRayTracingEnabled != "" {
-		xray.EnableTracing(o.S3)
-		xray.EnableTracing(o.SNS)
-		xray.EnableTracing(o.SSM)
-		xray.EnableTracing(o.Registrations)
 	}
 
 	return o, nil
 }
 
-func (o *API) RequestActivation(ctx context.Context, req *omnissm.RegistrationRequest) (*omnissm.RegistrationResponse, error) {
-	entry, err := o.Registrations.Get(ctx, req.Identity().Hash())
+func (o *OmniSSM) RequestActivation(ctx context.Context, req *omnissm.RegistrationRequest) (*omnissm.RegistrationResponse, error) {
+	//if !req.Verified() {
+	//return nil, errors.New("unverified registration request")
+	//}
+	entry, err := o.registry.Get(ctx, req.Hash())
 	if err == nil {
 		if ssm.IsManagedInstance(entry.ManagedId) || time.Now().Sub(entry.CreatedAt) < 12*time.Hour {
 			// duplicate request
 			return &omnissm.RegistrationResponse{
 				RegistrationEntry: *entry,
-				Region:            req.Identity().Region,
+				Region:            req.Region,
 				Existing:          true,
 			}, nil
 		}
@@ -107,50 +117,46 @@ func (o *API) RequestActivation(ctx context.Context, req *omnissm.RegistrationRe
 		// unrelated failure
 		return nil, err
 	}
-	activation, err := o.SSM.CreateActivation(ctx, req.Identity().Name())
+	activation, err := o.ssmAPI.CreateActivation(ctx, req.Name())
 	if err != nil {
 		// if we fail here, defer starting over
 		return nil, o.tryDefer(ctx, err, RequestActivation, req)
 	}
 	entry = &omnissm.RegistrationEntry{
-		Id:            req.Identity().Hash(),
+		Id:            req.Hash(),
 		CreatedAt:     time.Now().UTC(),
-		AccountId:     req.Identity().AccountId,
-		Region:        req.Identity().Region,
-		InstanceId:    req.Identity().InstanceId,
+		AccountId:     req.AccountId,
+		Region:        req.Region,
+		InstanceId:    req.InstanceId,
 		ClientVersion: req.ClientVersion,
 		Activation:    *activation,
 		ManagedId:     "-",
 	}
-	if err := o.Registrations.Put(ctx, entry); err != nil {
-		// if we fail here, defer saving the created activation to alleviate
-		// pressure on SSM to create it again
-		return nil, o.tryDefer(ctx, err, PutRegistrationEntry, entry)
+	if err := o.registry.Put(ctx, entry); err != nil {
+		return nil, err
 	}
 	return &omnissm.RegistrationResponse{
 		RegistrationEntry: *entry,
-		Region:            req.Identity().Region,
+		Region:            req.Region,
 	}, nil
 }
 
-func (o *API) DeregisterInstance(ctx context.Context, entry *omnissm.RegistrationEntry) error {
+func (o *OmniSSM) DeregisterInstance(ctx context.Context, entry *omnissm.RegistrationEntry) error {
 	// Check dynamodb first to ease API pressure on SSM for repeat/invalid calls
-	if _, err := o.Registrations.Get(ctx, entry.Id); err != nil {
+	if _, err := o.registry.Get(ctx, entry.Id); err != nil {
 		return o.tryDefer(ctx, err, DeregisterInstance, entry)
 	}
-	if err := o.SSM.DeregisterManagedInstance(ctx, entry.ManagedId); err != nil {
-		// if we fail here, defer starting over
-		return o.tryDefer(ctx, err, DeregisterInstance, entry)
+	if err := o.ssmAPI.DeregisterManagedInstance(ctx, entry.ManagedId); err != nil {
+		if errors.Cause(err) == ssm.ErrInvalidInstance {
+			// SSM no longer knows about the instance, but dynamodb does - continue
+		} else {
+			return o.tryDefer(ctx, err, DeregisterInstance, entry)
+		}
 	}
-	return o.DeleteRegistration(ctx, entry)
-}
-
-func (o *API) DeleteRegistration(ctx context.Context, entry *omnissm.RegistrationEntry) error {
-	if err := o.Registrations.Delete(ctx, entry.Id); err != nil {
-		// if we fail here, defer starting over
-		return o.tryDefer(ctx, err, DeleteRegistrationEntry, entry)
+	if err := o.registry.Delete(ctx, entry.Id); err != nil {
+		return err
 	}
-	if o.Config.ResourceDeletedSNSTopic != "" {
+	if o.config.ResourceDeletedSNSTopic != "" {
 		data, err := json.Marshal(map[string]interface{}{
 			"ManagedId":    entry.ManagedId,
 			"ResourceId":   entry.InstanceId,
@@ -158,56 +164,56 @@ func (o *API) DeleteRegistration(ctx context.Context, entry *omnissm.Registratio
 			"AWSRegion":    entry.Region,
 		})
 		if err != nil {
-			return errors.Wrap(err, "cannot marshal SNS message")
+			return errors.Wrap(err, "cannot marshal notification")
 		}
-		if err := o.SNS.Publish(ctx, o.Config.ResourceDeletedSNSTopic, data); err != nil {
+		if err := o.notifier.Publish(ctx, o.config.ResourceDeletedSNSTopic, data); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (o *API) TagInstance(ctx context.Context, tags *ssm.ResourceTags) error {
-	entry, err := o.Registrations.GetByManagedId(ctx, tags.ManagedId)
+func (o *OmniSSM) TagInstance(ctx context.Context, tags *ssm.ResourceTags) error {
+	entry, err := o.registry.GetByManagedId(ctx, tags.ManagedId)
 	if err != nil {
 		if errors.Cause(err) == omnissm.ErrRegistrationNotFound {
 			return errors.Wrapf(err, "failed to tag instance %#v", tags.ManagedId)
 		}
 		return err
 	}
-	if err := o.SSM.AddTagsToResource(ctx, tags); err != nil {
+	if err := o.ssmAPI.AddTagsToResource(ctx, tags); err != nil {
 		return o.tryDefer(ctx, err, AddTagsToResource, tags)
 	}
-	if err := o.Registrations.SetTagged(ctx, entry.Id, true); err != nil {
+	if err := o.registry.SetTagged(ctx, entry.Id, true); err != nil {
 		return errors.Wrap(err, "failed to update registration table with tagged flag")
 	}
 	return nil
 }
 
-func (o *API) PutInstanceInventory(ctx context.Context, inv *ssm.CustomInventory) error {
-	entry, err := o.Registrations.GetByManagedId(ctx, inv.ManagedId)
+func (o *OmniSSM) PutInstanceInventory(ctx context.Context, inv *ssm.CustomInventory) error {
+	entry, err := o.registry.GetByManagedId(ctx, inv.ManagedId)
 	if err != nil {
 		if errors.Cause(err) == omnissm.ErrRegistrationNotFound {
 			return errors.Wrapf(err, "cannot PutInventory for instance %#v", inv.ManagedId)
 		}
 		return err
 	}
-	if err := o.SSM.PutInventory(ctx, inv); err != nil {
+	if err := o.ssmAPI.PutInventory(ctx, inv); err != nil {
 		return o.tryDefer(ctx, err, PutInventory, inv)
 	}
-	return o.Registrations.SetInventoried(ctx, entry.Id, true)
+	return o.registry.SetInventoried(ctx, entry.Id, true)
 }
 
-func (o *API) tryDefer(ctx context.Context, err error, t DeferredActionType, value interface{}) error {
-	if c := errors.Cause(err); o.DeferQueue != nil && (request.IsErrorThrottle(c) || request.IsErrorRetryable(c)) {
-		sqsErr := o.DeferQueue.Send(ctx, &DeferredActionMessage{
+func (o *OmniSSM) tryDefer(ctx context.Context, err error, t DeferredActionType, value interface{}) error {
+	if c := errors.Cause(err); o.deferQueue != nil && (request.IsErrorThrottle(c) || request.IsErrorRetryable(c)) {
+		sqsErr := o.deferQueue.Send(ctx, &DeferredActionMessage{
 			Type:  t,
 			Value: value,
 		})
 		if sqsErr != nil {
 			return errors.Wrapf(sqsErr, "could not defer message (original error: %v)", err)
 		}
-		return errors.Wrapf(err, "deferred action to SQS queue (%s)", o.Config.QueueName)
+		return errors.Wrapf(err, "deferred action to queue (%s)", o.config.QueueName)
 	}
 	return err
 }

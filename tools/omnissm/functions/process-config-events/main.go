@@ -24,6 +24,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/configservice"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/s3"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm"
 )
@@ -40,6 +41,7 @@ var (
 	}
 
 	omni *omnissm.OmniSSM
+	svc  *s3.S3
 )
 
 func init() {
@@ -48,6 +50,14 @@ func init() {
 		panic(err)
 	}
 	omni, err = omnissm.New(config)
+	if err != nil {
+		panic(err)
+	}
+
+	svc, err = s3.New(&s3.Config{
+		EnableTracing: config.XRayTracingEnabled,
+		AssumeRole:    config.S3DownloadRole,
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -163,7 +173,7 @@ func main() {
 			if _, ok := resourceStatusTypes[event.Detail.ConfigurationItemSummary.ConfigurationItemStatus]; !ok {
 				return
 			}
-			data, err := omni.S3.GetObject(ctx, event.Detail.S3DeliverySummary.S3BucketLocation)
+			data, err := svc.GetObject(ctx, event.Detail.S3DeliverySummary.S3BucketLocation)
 			if err != nil {
 				return errors.Wrap(err, "cannot download oversized configuration item")
 			}
