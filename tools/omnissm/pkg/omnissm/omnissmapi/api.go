@@ -184,10 +184,7 @@ func (o *OmniSSM) TagInstance(ctx context.Context, tags *ssm.ResourceTags) error
 	if err := o.ssmAPI.AddTagsToResource(ctx, tags); err != nil {
 		return o.tryDefer(ctx, err, AddTagsToResource, tags)
 	}
-	if err := o.registry.SetTagged(ctx, entry.Id, true); err != nil {
-		return errors.Wrap(err, "failed to update registration table with tagged flag")
-	}
-	return nil
+	return o.registry.SetTagged(ctx, entry.Id, true)
 }
 
 func (o *OmniSSM) PutInstanceInventory(ctx context.Context, inv *ssm.CustomInventory) error {
