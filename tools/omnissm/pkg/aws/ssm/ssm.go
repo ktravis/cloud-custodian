@@ -111,6 +111,8 @@ func (s *SSM) AddTagsToResource(ctx context.Context, input *ResourceTags) error 
 	return errors.Wrapf(err, "ssm.AddTagsToResource failed: %#v", input.ManagedId)
 }
 
+// TODO: custom inventory can also contain an array of maps, which our current
+// system does not handle.
 type CustomInventory struct {
 	TypeName    string
 	ManagedId   string
