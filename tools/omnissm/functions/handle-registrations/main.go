@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 
@@ -32,6 +33,7 @@ import (
 
 type registrationHandler struct {
 	*omnissm.OmniSSM
+	*sns.SNS
 }
 
 func (r *registrationHandler) RequestActivation(ctx context.Context, req *omnissm.RegistrationRequest) (*omnissm.RegistrationResponse, error) {
@@ -52,27 +54,24 @@ func (r *registrationHandler) RequestActivation(ctx context.Context, req *omniss
 func (r *registrationHandler) UpdateRegistration(ctx context.Context, req *omnissm.RegistrationRequest) (*omnissm.RegistrationResponse, error) {
 	logger := log.With().Str("handler", "UpdateRegistration").Logger()
 	logger.Info().Interface("request", req).Interface("identity", req.Identity()).Msg("update registration request")
-	if !ssm.IsManagedInstance(req.ManagedId) {
-		return nil, lambda.BadRequestError{fmt.Sprintf("invalid managedId %#v", req.ManagedId)}
-	}
 	id := req.Identity().Hash()
-	entry, err := r.OmniSSM.Registrations.Get(ctx, id)
+	entry, err := r.OmniSSM.ConfirmRegistration(ctx, id, req.ManagedId, true)
 	if err != nil {
-		if errors.Cause(err) == omnissm.ErrRegistrationNotFound {
+		switch errors.Cause(err) {
+		case ssm.ErrInvalidInstance:
+			err = lambda.BadRequestError{fmt.Sprintf("invalid managedId %#v", req.ManagedId)}
+		case omnissm.ErrRegistrationNotFound:
 			logger.Info().Str("instanceName", req.Identity().Name()).Str("id", id).Msg("registration entry not found")
-			return nil, lambda.NotFoundError{fmt.Sprintf("entry not found: %#v", id)}
+			err = lambda.NotFoundError{fmt.Sprintf("entry not found: %#v", id)}
+		default:
+			logger.Error().Interface("regquest", req).Err(err).Msg("error confirming registration")
 		}
-		return nil, err
-	}
-	logger.Info().Interface("entry", entry).Msg("registration entry found")
-	entry.ManagedId = req.ManagedId
-	if err := r.OmniSSM.Registrations.Update(ctx, entry); err != nil {
 		return nil, err
 	}
 	logger.Info().Interface("entry", entry).Msg("registration entry updated")
 	if t := r.OmniSSM.Config.ResourceRegisteredSNSTopic; t != "" {
 		if data, err := json.Marshal(entry); err == nil {
-			if err := r.OmniSSM.SNS.Publish(ctx, t, data); err != nil {
+			if err := r.Publish(ctx, t, data); err != nil {
 				logger.Error().Str("topic", t).Err(err).Msg("cannot send SNS message")
 			}
 		} else {
@@ -106,7 +105,14 @@ func main() {
 			amiWhitelist[strings.Join([]string{i.AccountId, i.RegionName, i.ImageId}, ",")] = true
 		}
 	}
-	r := registrationHandler{omni}
+	r := registrationHandler{
+		OmniSSM: omni,
+		SNS: sns.New(&sns.Config{
+			Config:        config.Config,
+			AssumeRole:    config.SNSPublishRole,
+			EnableTracing: config.XRayTracingEnabled != "",
+		}),
+	}
 	lambda.Start(func(ctx context.Context, req events.APIGatewayProxyRequest) (*events.APIGatewayProxyResponse, error) {
 		switch req.Resource {
 		case "/register":

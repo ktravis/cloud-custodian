@@ -22,7 +22,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/pkg/errors"
 
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/sns"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/sqs"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm"
@@ -35,10 +34,6 @@ type ssmAPI interface {
 	DeregisterManagedInstance(context.Context, string) error
 }
 
-type notifier interface {
-	Publish(context.Context, string, []byte) error
-}
-
 type deferQueue interface {
 	Send(context.Context, json.Marshaler) error
 }
@@ -48,6 +43,7 @@ type registry interface {
 	GetByManagedId(context.Context, string) (*omnissm.RegistrationEntry, error)
 	Put(context.Context, *omnissm.RegistrationEntry) error
 	Delete(context.Context, string) error
+	SetManagedId(context.Context, string, string) error
 	SetTagged(context.Context, string, bool) error
 	SetInventoried(context.Context, string, bool) error
 }
@@ -57,7 +53,6 @@ type OmniSSM struct {
 	config *Config
 
 	ssmAPI
-	notifier
 	deferQueue
 	registry
 }
@@ -68,11 +63,6 @@ func New(config *Config) (*OmniSSM, error) {
 		registry: omnissm.NewRegistrations(&omnissm.RegistrationsConfig{
 			Config:        config.Config,
 			TableName:     config.RegistrationsTable,
-			EnableTracing: config.XRayTracingEnabled != "",
-		}),
-		notifier: sns.New(&sns.Config{
-			Config:        config.Config,
-			AssumeRole:    config.SNSPublishRole,
 			EnableTracing: config.XRayTracingEnabled != "",
 		}),
 		ssmAPI: ssm.New(&ssm.Config{
@@ -141,6 +131,24 @@ func (o *OmniSSM) RequestActivation(ctx context.Context, req *omnissm.Registrati
 	}, nil
 }
 
+// ConfirmRegistration verifies the SSM registration for a given instance ID by
+// sending the assigned managed instance id returned from the SSM service. The
+// managed id is recorded in the registry.
+func (o *OmniSSM) ConfirmRegistration(ctx context.Context, id, mid string) (*omnissm.RegistrationEntry, error) {
+	if !ssm.IsManagedInstance(mid) {
+		return nil, errors.Wrapf(ssm.ErrInvalidInstance, "unable to confirm %#v - %#v", id, mid)
+	}
+	entry, err := o.registry.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	entry.ManagedId = mid
+	if err := o.registry.SetManagedId(ctx, id, mid); err != nil {
+		return nil, err
+	}
+	return entry, nil
+}
+
 func (o *OmniSSM) DeregisterInstance(ctx context.Context, entry *omnissm.RegistrationEntry) error {
 	// Check dynamodb first to ease API pressure on SSM for repeat/invalid calls
 	if _, err := o.registry.Get(ctx, entry.Id); err != nil {
@@ -155,20 +163,6 @@ func (o *OmniSSM) DeregisterInstance(ctx context.Context, entry *omnissm.Registr
 	}
 	if err := o.registry.Delete(ctx, entry.Id); err != nil {
 		return err
-	}
-	if o.config.ResourceDeletedSNSTopic != "" {
-		data, err := json.Marshal(map[string]interface{}{
-			"ManagedId":    entry.ManagedId,
-			"ResourceId":   entry.InstanceId,
-			"AWSAccountId": entry.AccountId,
-			"AWSRegion":    entry.Region,
-		})
-		if err != nil {
-			return errors.Wrap(err, "cannot marshal notification")
-		}
-		if err := o.notifier.Publish(ctx, o.config.ResourceDeletedSNSTopic, data); err != nil {
-			return err
-		}
 	}
 	return nil
 }

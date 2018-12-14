@@ -201,24 +201,92 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 	}
 }
 
-func TestOmniSSMDeregisterInstance(t *testing.T) {
-	type notification struct {
-		Topic string
-		Data  string
+func TestOmniSSMConfirmRegistration(t *testing.T) {
+	req := &omnissm.RegistrationRequest{
+		SecureIdentity: omnissm.SecureIdentity{
+			InstanceIdentity: &omnissm.InstanceIdentity{
+				AccountId:  "my_account",
+				InstanceId: "i-0123456789012345",
+			},
+		},
 	}
-	newNotification := func(topic string, entry *omnissm.RegistrationEntry) *notification {
-		data, err := json.Marshal(map[string]interface{}{
-			"ManagedId":    entry.ManagedId,
-			"ResourceId":   entry.InstanceId,
-			"AWSAccountId": entry.AccountId,
-			"AWSRegion":    entry.Region,
-		})
-		if err != nil {
-			panic(err)
-		}
-		return &notification{topic, string(data)}
+	entry := &omnissm.RegistrationEntry{
+		Id:         req.Hash(),
+		ManagedId:  "",
+		AccountId:  req.AccountId,
+		InstanceId: req.InstanceId,
+	}
+	managedEntry := &omnissm.RegistrationEntry{
+		Id:         req.Hash(),
+		ManagedId:  "mi-12345",
+		AccountId:  req.AccountId,
+		InstanceId: req.InstanceId,
 	}
 
+	cases := []struct {
+		name string
+		registry
+		id, mid    string
+		wantEntry  *omnissm.RegistrationEntry
+		checkError func(error) bool
+	}{
+		{
+			name:      "normal case",
+			registry:  newMockRegistry(entry),
+			id:        entry.Id,
+			mid:       "mi-12345",
+			wantEntry: managedEntry,
+		},
+		{
+			name:       "unknown instance",
+			registry:   newMockRegistry(),
+			id:         entry.Id,
+			mid:        "mi-12345",
+			checkError: isError(omnissm.ErrRegistrationNotFound),
+		},
+		{
+			name:       "empty mid",
+			registry:   newMockRegistry(entry),
+			id:         entry.Id,
+			checkError: isCausedBy(ssm.ErrInvalidInstance),
+		},
+		{
+			name:       "invalid mid",
+			registry:   newMockRegistry(entry),
+			id:         entry.Id,
+			mid:        "i-12345",
+			checkError: isCausedBy(ssm.ErrInvalidInstance),
+		},
+		{
+			name:       "SetManagedId fault",
+			registry:   &errRegistry{entry: entry, setManagedId: fatalError},
+			id:         entry.Id,
+			mid:        "mi-12345",
+			checkError: isError(fatalError),
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o := &OmniSSM{
+				registry: c.registry,
+			}
+
+			entry, err := o.ConfirmRegistration(context.Background(), c.id, c.mid)
+			if err != nil {
+				if c.checkError == nil || !c.checkError(err) {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+
+			if d := cmp.Diff(c.wantEntry, entry, stdCmpOpts...); d != "" {
+				t.Errorf("unexpected response entry: %v", d)
+			}
+		})
+	}
+}
+
+func TestOmniSSMDeregisterInstance(t *testing.T) {
 	existingEntry := &omnissm.RegistrationEntry{
 		Id:        "1",
 		ManagedId: "mi-123",
@@ -232,7 +300,6 @@ func TestOmniSSMDeregisterInstance(t *testing.T) {
 		registry                  registry
 		deregisterManagedInstance func(string) error
 		wantDeferred              *DeferredActionMessage
-		wantNotification          *notification
 		checkError                func(error) bool
 	}{
 		{
@@ -256,7 +323,6 @@ func TestOmniSSMDeregisterInstance(t *testing.T) {
 				}
 				return nil
 			},
-			wantNotification: newNotification("mytopic", existingEntry),
 		},
 		{
 			name:       "instance does not exist",
@@ -270,8 +336,6 @@ func TestOmniSSMDeregisterInstance(t *testing.T) {
 			checkError: isCausedBy(omnissm.ErrRegistrationNotFound),
 			registry:   newMockRegistry(existingEntry),
 
-			// should still receive a notification!
-			wantNotification:          newNotification("mytopic", existingEntry),
 			deregisterManagedInstance: func(id string) error { return ssm.ErrInvalidInstance },
 		},
 		{
@@ -318,7 +382,6 @@ func TestOmniSSMDeregisterInstance(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			var (
 				deferred         *DeferredActionMessage
-				notified         *notification
 				calledDeregister bool
 			)
 			dereg := c.deregisterManagedInstance
@@ -333,13 +396,6 @@ func TestOmniSSMDeregisterInstance(t *testing.T) {
 				registry:   c.registry,
 				ssmAPI:     &mockSSMAPI{deregisterManagedInstance: dereg},
 				deferQueue: mockQueue(&deferred),
-				notifier: mockNotifier(func(topic string, data []byte) error {
-					notified = &notification{topic, string(data)}
-					return nil
-				}),
-			}
-			if c.wantNotification != nil {
-				o.config.ResourceDeletedSNSTopic = c.wantNotification.Topic
 			}
 			err := o.DeregisterInstance(context.Background(), c.entry)
 			if err == nil {
@@ -357,10 +413,6 @@ func TestOmniSSMDeregisterInstance(t *testing.T) {
 
 			if d := cmp.Diff(c.wantDeferred, deferred, stdCmpOpts...); d != "" {
 				t.Errorf("unexpected deferred message: %v", d)
-			}
-
-			if d := cmp.Diff(c.wantNotification, notified, stdCmpOpts...); d != "" {
-				t.Errorf("unexpected response: %v", d)
 			}
 		})
 	}
@@ -641,7 +693,6 @@ func TestOmniSSMTryDefer(t *testing.T) {
 // Mocks definitions
 
 var _ ssmAPI = (*mockSSMAPI)(nil)
-var _ notifier = (mockNotifier)(nil)
 var _ deferQueue = (mockQueueFunc)(nil)
 var _ registry = (*mockRegistry)(nil)
 
@@ -663,12 +714,6 @@ func (s *mockSSMAPI) PutInventory(ctx context.Context, inv *ssm.CustomInventory)
 }
 func (s *mockSSMAPI) DeregisterManagedInstance(ctx context.Context, mid string) error {
 	return s.deregisterManagedInstance(mid)
-}
-
-type mockNotifier func(string, []byte) error
-
-func (n mockNotifier) Publish(ctx context.Context, topic string, b []byte) error {
-	return n(topic, b)
 }
 
 type mockQueueFunc func(json.Marshaler) error
@@ -735,6 +780,17 @@ func (r *mockRegistry) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+func (r *mockRegistry) SetManagedId(ctx context.Context, id, mid string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[id]
+	if !ok {
+		return omnissm.ErrRegistrationNotFound
+	}
+	e.ManagedId = mid
+	return nil
+}
+
 func (r *mockRegistry) SetTagged(ctx context.Context, id string, b bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -767,9 +823,10 @@ func (r *mockRegistry) SetInventoried(ctx context.Context, id string, b bool) er
 
 // mock for returning errors from registry methods
 type errRegistry struct {
-	entry                            *omnissm.RegistrationEntry
-	get, getByManagedId, put, delete error
-	setTagged, setInventoried        error
+	entry *omnissm.RegistrationEntry
+
+	get, getByManagedId, put, delete        error
+	setManagedId, setTagged, setInventoried error
 }
 
 func (r *errRegistry) Get(ctx context.Context, id string) (*omnissm.RegistrationEntry, error) {
@@ -786,6 +843,10 @@ func (r *errRegistry) Put(ctx context.Context, e *omnissm.RegistrationEntry) err
 
 func (r *errRegistry) Delete(ctx context.Context, id string) error {
 	return r.delete
+}
+
+func (r *errRegistry) SetManagedId(ctx context.Context, id, mid string) error {
+	return r.setManagedId
 }
 
 func (r *errRegistry) SetTagged(ctx context.Context, id string, b bool) error {

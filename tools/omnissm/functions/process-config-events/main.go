@@ -25,6 +25,7 @@ import (
 
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/configservice"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/s3"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/sns"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm"
 )
@@ -39,29 +40,7 @@ var (
 		"ResourceDiscovered": struct{}{},
 		"OK":                 struct{}{},
 	}
-
-	omni *omnissm.OmniSSM
-	svc  *s3.S3
 )
-
-func init() {
-	config, err := omnissm.ReadConfig("config.yaml")
-	if err != nil {
-		panic(err)
-	}
-	omni, err = omnissm.New(config)
-	if err != nil {
-		panic(err)
-	}
-
-	svc, err = s3.New(&s3.Config{
-		EnableTracing: config.XRayTracingEnabled,
-		AssumeRole:    config.S3DownloadRole,
-	})
-	if err != nil {
-		panic(err)
-	}
-}
 
 func removeTimestampMilliseconds(s string) string {
 	t, err := time.Parse(time.RFC3339, s)
@@ -73,8 +52,13 @@ func removeTimestampMilliseconds(s string) string {
 	return t.Format("2006-01-02T15:04:05Z")
 }
 
-func handleConfigurationItemChange(ctx context.Context, detail configservice.ConfigurationItemDetail) error {
-	entry, err, ok := omni.Registrations.Get(ctx, detail.ConfigurationItem.Hash())
+type configChangeHandler struct {
+	*omnissm.OmniSSM
+	*sns.SNS
+}
+
+func (h *configChangeHandler) handleConfigurationItemChange(ctx context.Context, detail configservice.ConfigurationItemDetail) error {
+	entry, err, ok := h.OmniSSM.Registrations.Get(ctx, detail.ConfigurationItem.Hash())
 	if err != nil {
 		return err
 	}
@@ -90,7 +74,7 @@ func handleConfigurationItemChange(ctx context.Context, detail configservice.Con
 	case "ResourceDiscovered", "OK":
 		tags := make(map[string]string)
 		for k, v := range detail.ConfigurationItem.Tags {
-			if !omni.HasResourceTag(k) {
+			if !h.OmniSSM.HasResourceTag(k) {
 				continue
 			}
 			tags[k] = v
@@ -103,7 +87,7 @@ func handleConfigurationItemChange(ctx context.Context, detail configservice.Con
 			ManagedId: entry.ManagedId,
 			Tags:      tags,
 		}
-		if err := omni.TagInstance(ctx, resourceTags); err != nil {
+		if err := h.OmniSSM.TagInstance(ctx, resourceTags); err != nil {
 			if c := errors.Cause(err); c == omnissm.ErrRegistrationNotFound || c == ssm.ErrInvalidInstance {
 				log.Warn().Err(err).Msg("instance no longer exists")
 				return nil
@@ -122,7 +106,7 @@ func handleConfigurationItemChange(ctx context.Context, detail configservice.Con
 			CaptureTime: removeTimestampMilliseconds(detail.ConfigurationItem.ConfigurationItemCaptureTime),
 			Content:     configservice.ConfigurationItemContentMap(detail.ConfigurationItem),
 		}
-		if err := omni.PutInstanceInventory(ctx, &inv); err != nil {
+		if err := h.OmniSSM.PutInstanceInventory(ctx, &inv); err != nil {
 			if c := errors.Cause(err); c == omnissm.ErrRegistrationNotFound || c == ssm.ErrInvalidInstance {
 				log.Warn().Err(err).Msg("instance no longer exists")
 				return nil
@@ -131,10 +115,19 @@ func handleConfigurationItemChange(ctx context.Context, detail configservice.Con
 		}
 		log.Info().Msgf("PutInventory successful for %#v", entry.ManagedId)
 	case "ResourceDeleted":
-		if err := omni.DeregisterInstance(ctx, entry); err != nil {
+		if err := h.OmniSSM.DeregisterInstance(ctx, entry); err != nil {
 			return err
 		}
 		log.Info().Msgf("Successfully deregistered instance: %#v", entry.ManagedId)
+		if h.OmniSSM.config.ResourceDeletedSNSTopic != "" {
+			data, err := json.Marshal(entry)
+			if err != nil {
+				return errors.Wrap(err, "cannot marshal notification")
+			}
+			if err := h.SNS.Publish(ctx, h.OmniSSM.config.ResourceDeletedSNSTopic, data); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -152,6 +145,28 @@ type cloudWatchEvent struct {
 }
 
 func main() {
+	config, err := omnissm.ReadConfig("config.yaml")
+	if err != nil {
+		panic(err)
+	}
+	omni, err := omnissm.New(config)
+	if err != nil {
+		panic(err)
+	}
+
+	h := &configChangeHandler{
+		OmniSSM: omni,
+		S3: s3.New(&s3.Config{
+			EnableTracing: config.XRayTracingEnabled,
+			AssumeRole:    config.S3DownloadRole,
+		}),
+		SNS: sns.New(&sns.Config{
+			Config:        config.Config,
+			AssumeRole:    config.SNSPublishRole,
+			EnableTracing: config.XRayTracingEnabled != "",
+		}),
+	}
+
 	lambda.Start(func(ctx context.Context, event cloudWatchEvent) (err error) {
 		if event.Source != "aws.config" {
 			return

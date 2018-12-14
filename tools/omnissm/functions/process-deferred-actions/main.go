@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 
@@ -26,21 +27,24 @@ import (
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm"
 )
 
-var omni *omnissm.OmniSSM
+type deferredActionHandler struct {
+	*omnissm.OmniSSM
+	*sns.SNS
+}
 
 type message struct {
 	Type  omnissm.DeferredActionType
 	Value json.RawMessage
 }
 
-func processDeferredActionMessage(ctx context.Context, msg message) error {
+func (h *deferredActionHandler) processDeferredActionMessage(ctx context.Context, msg message) error {
 	switch msg.Type {
 	case omnissm.AddTagsToResource:
 		var resourceTags ssm.ResourceTags
 		if err := json.Unmarshal(msg.Value, &resourceTags); err != nil {
 			return errors.Wrap(err, "cannot unmarshal DeferredActionMessage.Value")
 		}
-		if err := omni.TagInstance(ctx, &resourceTags); err != nil {
+		if err := h.OmniSSM.TagInstance(ctx, &resourceTags); err != nil {
 			if c := errors.Cause(err); c == omnissm.ErrRegistrationNotFound || c == ssm.ErrInvalidInstance {
 				log.Warn().Err(err).Msg("instance no longer exists")
 				return nil
@@ -53,7 +57,7 @@ func processDeferredActionMessage(ctx context.Context, msg message) error {
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
 			return errors.Wrap(err, "cannot unmarshal DeferredActionMessage.Value")
 		}
-		resp, err := omni.RequestActivation(ctx, &req)
+		resp, err := h.OmniSSM.RequestActivation(ctx, &req)
 		if err != nil {
 			return err
 		}
@@ -70,19 +74,28 @@ func processDeferredActionMessage(ctx context.Context, msg message) error {
 		if !ssm.IsManagedInstance(entry.ManagedId) {
 			return errors.Errorf("registration managed id is invalid: %#v", entry.ManagedId)
 		}
-		if err := omni.DeregisterInstance(ctx, &entry); err != nil {
+		if err := h.OmniSSM.DeregisterInstance(ctx, &entry); err != nil {
 			if errors.Cause(err) == ErrRegistrationNotFound {
 				log.Warn().Err(err).Str("Id", id).Msg("instance no longer exists")
 				return nil
 			}
 			return err
 		}
+		if o.config.ResourceDeletedSNSTopic != "" {
+			data, err := json.Marshal(entry)
+			if err != nil {
+				return errors.Wrap(err, "cannot marshal notification")
+			}
+			if err := o.SNS.Publish(ctx, o.config.ResourceDeletedSNSTopic, data); err != nil {
+				return err
+			}
+		}
 	case omnissm.PutInventory:
 		var inv ssm.CustomInventory
 		if err := json.Unmarshal(msg.Value, &inv); err != nil {
 			return errors.Wrap(err, "cannot unmarshal DeferredActionMessage.Value")
 		}
-		if err := omni.PutInstanceInventory(ctx, &inv); err != nil {
+		if err := h.OmniSSM.PutInstanceInventory(ctx, &inv); err != nil {
 			if c := errors.Cause(err); c == omnissm.ErrRegistrationNotFound || c == ssm.ErrInvalidInstance {
 				log.Warn().Err(err).Msg("instance no longer exists")
 				return nil
@@ -105,8 +118,17 @@ func main() {
 		panic(err)
 	}
 
+	h := &deferredActionHandler{
+		OmniSSM: omni,
+		SNS: sns.New(&sns.Config{
+			Config:        config.Config,
+			AssumeRole:    config.SNSPublishRole,
+			EnableTracing: config.XRayTracingEnabled != "",
+		}),
+	}
+
 	lambda.Start(func(ctx context.Context, m message) error {
-		if err := handleConfigurationItemChange(ctx, msg); err != nil {
+		if err := h.handleConfigurationItemChange(ctx, msg); err != nil {
 			log.Info().Err(err).Interface("message", m).Msg("processing DeferredActionMessage failed")
 			return err
 		}
