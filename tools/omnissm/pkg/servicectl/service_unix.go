@@ -11,6 +11,14 @@ import (
 	"github.com/pkg/errors"
 )
 
+func run(cmd string, args ...string) ([]byte, error) {
+	out, err := exec.Command(cmd, args...).CombinedOutput()
+	if err != nil {
+		return out, errors.Wrapf(err, "%s command failed", cmd)
+	}
+	return out, nil
+}
+
 func newService(name string) (Service, error) {
 	switch {
 	case isSystemd():

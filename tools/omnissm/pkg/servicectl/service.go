@@ -14,24 +14,10 @@
 
 package servicectl
 
-import (
-	"os/exec"
-
-	"github.com/pkg/errors"
-)
-
 type Service interface {
 	Start() error
 	Stop() error
 	Restart() error
-}
-
-func run(cmd string, args ...string) ([]byte, error) {
-	out, err := exec.Command(cmd, args...).CombinedOutput()
-	if err != nil {
-		return out, errors.Wrapf(err, "%s command failed", cmd)
-	}
-	return out, nil
 }
 
 func New(name string) (Service, error) {
