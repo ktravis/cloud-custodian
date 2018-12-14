@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package omnissmapi
+package omnissm
 
 import (
 	"context"
@@ -24,7 +24,6 @@ import (
 
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/sqs"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm"
 )
 
 type ssmAPI interface {
@@ -39,9 +38,9 @@ type deferQueue interface {
 }
 
 type registry interface {
-	Get(context.Context, string) (*omnissm.RegistrationEntry, error)
-	GetByManagedId(context.Context, string) (*omnissm.RegistrationEntry, error)
-	Put(context.Context, *omnissm.RegistrationEntry) error
+	Get(context.Context, string) (*RegistrationEntry, error)
+	GetByManagedId(context.Context, string) (*RegistrationEntry, error)
+	Put(context.Context, *RegistrationEntry) error
 	Delete(context.Context, string) error
 	SetManagedId(context.Context, string, string) error
 	SetTagged(context.Context, string, bool) error
@@ -60,7 +59,7 @@ type OmniSSM struct {
 func New(config *Config) (*OmniSSM, error) {
 	o := &OmniSSM{
 		config: config,
-		registry: omnissm.NewRegistrations(&omnissm.RegistrationsConfig{
+		registry: NewRegistrations(&RegistrationsConfig{
 			Config:        config.Config,
 			TableName:     config.RegistrationsTable,
 			EnableTracing: config.XRayTracingEnabled != "",
@@ -87,7 +86,7 @@ func New(config *Config) (*OmniSSM, error) {
 	return o, nil
 }
 
-func (o *OmniSSM) RequestActivation(ctx context.Context, req *omnissm.RegistrationRequest) (*omnissm.RegistrationResponse, error) {
+func (o *OmniSSM) RequestActivation(ctx context.Context, req *RegistrationRequest) (*RegistrationResponse, error) {
 	//if !req.Verified() {
 	//return nil, errors.New("unverified registration request")
 	//}
@@ -95,13 +94,13 @@ func (o *OmniSSM) RequestActivation(ctx context.Context, req *omnissm.Registrati
 	if err == nil {
 		if ssm.IsManagedInstance(entry.ManagedId) || time.Now().Sub(entry.CreatedAt) < 12*time.Hour {
 			// duplicate request
-			return &omnissm.RegistrationResponse{
+			return &RegistrationResponse{
 				RegistrationEntry: *entry,
 				Region:            req.Region,
 				Existing:          true,
 			}, nil
 		}
-	} else if errors.Cause(err) == omnissm.ErrRegistrationNotFound {
+	} else if errors.Cause(err) == ErrRegistrationNotFound {
 		// new registration request
 	} else {
 		// unrelated failure
@@ -112,7 +111,7 @@ func (o *OmniSSM) RequestActivation(ctx context.Context, req *omnissm.Registrati
 		// if we fail here, defer starting over
 		return nil, o.tryDefer(ctx, err, RequestActivation, req)
 	}
-	entry = &omnissm.RegistrationEntry{
+	entry = &RegistrationEntry{
 		Id:            req.Hash(),
 		CreatedAt:     time.Now().UTC(),
 		AccountId:     req.AccountId,
@@ -125,7 +124,7 @@ func (o *OmniSSM) RequestActivation(ctx context.Context, req *omnissm.Registrati
 	if err := o.registry.Put(ctx, entry); err != nil {
 		return nil, err
 	}
-	return &omnissm.RegistrationResponse{
+	return &RegistrationResponse{
 		RegistrationEntry: *entry,
 		Region:            req.Region,
 	}, nil
@@ -134,7 +133,7 @@ func (o *OmniSSM) RequestActivation(ctx context.Context, req *omnissm.Registrati
 // ConfirmRegistration verifies the SSM registration for a given instance ID by
 // sending the assigned managed instance id returned from the SSM service. The
 // managed id is recorded in the registry.
-func (o *OmniSSM) ConfirmRegistration(ctx context.Context, id, mid string) (*omnissm.RegistrationEntry, error) {
+func (o *OmniSSM) ConfirmRegistration(ctx context.Context, id, mid string) (*RegistrationEntry, error) {
 	if !ssm.IsManagedInstance(mid) {
 		return nil, errors.Wrapf(ssm.ErrInvalidInstance, "unable to confirm %#v - %#v", id, mid)
 	}
@@ -149,7 +148,7 @@ func (o *OmniSSM) ConfirmRegistration(ctx context.Context, id, mid string) (*omn
 	return entry, nil
 }
 
-func (o *OmniSSM) DeregisterInstance(ctx context.Context, entry *omnissm.RegistrationEntry) error {
+func (o *OmniSSM) DeregisterInstance(ctx context.Context, entry *RegistrationEntry) error {
 	// Check dynamodb first to ease API pressure on SSM for repeat/invalid calls
 	if _, err := o.registry.Get(ctx, entry.Id); err != nil {
 		return o.tryDefer(ctx, err, DeregisterInstance, entry)
@@ -170,7 +169,7 @@ func (o *OmniSSM) DeregisterInstance(ctx context.Context, entry *omnissm.Registr
 func (o *OmniSSM) TagInstance(ctx context.Context, tags *ssm.ResourceTags) error {
 	entry, err := o.registry.GetByManagedId(ctx, tags.ManagedId)
 	if err != nil {
-		if errors.Cause(err) == omnissm.ErrRegistrationNotFound {
+		if errors.Cause(err) == ErrRegistrationNotFound {
 			return errors.Wrapf(err, "failed to tag instance %#v", tags.ManagedId)
 		}
 		return err
@@ -184,7 +183,7 @@ func (o *OmniSSM) TagInstance(ctx context.Context, tags *ssm.ResourceTags) error
 func (o *OmniSSM) PutInstanceInventory(ctx context.Context, inv *ssm.CustomInventory) error {
 	entry, err := o.registry.GetByManagedId(ctx, inv.ManagedId)
 	if err != nil {
-		if errors.Cause(err) == omnissm.ErrRegistrationNotFound {
+		if errors.Cause(err) == ErrRegistrationNotFound {
 			return errors.Wrapf(err, "cannot PutInventory for instance %#v", inv.ManagedId)
 		}
 		return err

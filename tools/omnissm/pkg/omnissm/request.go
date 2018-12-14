@@ -14,7 +14,6 @@
 
 package omnissm
 
-// TODO: factor out dependency on ec2metadata from this package
 type RegistrationRequest struct {
 	ManagedId     string `json:"managedId,omitempty"`
 	ClientVersion string `json:"clientVersion,omitempty"`

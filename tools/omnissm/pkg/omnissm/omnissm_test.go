@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package omnissmapi
+package omnissm
 
 import (
 	"context"
@@ -24,7 +24,6 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/pkg/errors"
@@ -40,9 +39,9 @@ var (
 		}, cmp.Ignore()),
 
 		cmpopts.IgnoreUnexported(
-			omnissm.SecureIdentity{},
-			omnissm.RegistrationRequest{},
-			omnissm.RegistrationResponse{},
+			SecureIdentity{},
+			RegistrationRequest{},
+			RegistrationResponse{},
 		),
 	}
 )
@@ -62,21 +61,21 @@ func isDeferredError(e error) bool {
 // Actual tests
 
 func TestOmniSSMRequestActivation(t *testing.T) {
-	req := &omnissm.RegistrationRequest{
-		SecureIdentity: omnissm.SecureIdentity{
-			InstanceIdentity: &omnissm.InstanceIdentity{
+	req := &RegistrationRequest{
+		SecureIdentity: SecureIdentity{
+			InstanceIdentity: &InstanceIdentity{
 				AccountId:  "my_account",
 				InstanceId: "i-0123456789012345",
 			},
 		},
 	}
-	managedEntry := &omnissm.RegistrationEntry{
+	managedEntry := &RegistrationEntry{
 		Id:         req.Hash(),
 		ManagedId:  "mi-0123456789012345",
 		AccountId:  req.AccountId,
 		InstanceId: req.InstanceId,
 	}
-	activationEntry := &omnissm.RegistrationEntry{
+	activationEntry := &RegistrationEntry{
 		Id:         req.Hash(),
 		ManagedId:  "-",
 		CreatedAt:  time.Now(), // TODO: RequestActivation checks against time.Now, consider refactor
@@ -84,7 +83,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 		InstanceId: req.InstanceId,
 		Activation: ssm.Activation{ActivationCode: "code", ActivationId: "id"},
 	}
-	oldActivationEntry := &omnissm.RegistrationEntry{
+	oldActivationEntry := &RegistrationEntry{
 		Id:         req.Hash(),
 		ManagedId:  "-",
 		CreatedAt:  time.Now().Add(-48 * time.Hour), // TODO: See above
@@ -95,18 +94,18 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 
 	cases := []struct {
 		name          string
-		request       *omnissm.RegistrationRequest
+		request       *RegistrationRequest
 		registry      registry
 		newActivation func(string) (*ssm.Activation, error)
 		wantDeferred  *DeferredActionMessage
-		wantResponse  *omnissm.RegistrationResponse
+		wantResponse  *RegistrationResponse
 		checkError    func(error) bool
 	}{
 		{
 			name:     "instance already managed",
 			request:  req,
 			registry: newMockRegistry(managedEntry),
-			wantResponse: &omnissm.RegistrationResponse{
+			wantResponse: &RegistrationResponse{
 				RegistrationEntry: *managedEntry,
 				Existing:          true,
 			},
@@ -116,7 +115,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 			name:     "activiation previously created",
 			request:  req,
 			registry: newMockRegistry(activationEntry),
-			wantResponse: &omnissm.RegistrationResponse{
+			wantResponse: &RegistrationResponse{
 				RegistrationEntry: *activationEntry,
 				Existing:          true,
 			},
@@ -127,7 +126,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 			request:       req,
 			registry:      newMockRegistry(oldActivationEntry),
 			newActivation: func(name string) (*ssm.Activation, error) { return &activationEntry.Activation, nil },
-			wantResponse: &omnissm.RegistrationResponse{
+			wantResponse: &RegistrationResponse{
 				RegistrationEntry: *activationEntry,
 			},
 		},
@@ -135,7 +134,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 		{
 			name:          "CreateActivation throttled",
 			request:       req,
-			registry:      &errRegistry{get: omnissm.ErrRegistrationNotFound},
+			registry:      &errRegistry{get: ErrRegistrationNotFound},
 			newActivation: func(name string) (*ssm.Activation, error) { return nil, throttleError },
 			wantDeferred:  &DeferredActionMessage{RequestActivation, req},
 			checkError:    isDeferredError,
@@ -144,7 +143,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 		{
 			name:          "CreateActivation fault",
 			request:       req,
-			registry:      &errRegistry{get: omnissm.ErrRegistrationNotFound},
+			registry:      &errRegistry{get: ErrRegistrationNotFound},
 			newActivation: func(name string) (*ssm.Activation, error) { return nil, fatalError },
 			checkError:    isError(fatalError),
 		},
@@ -159,7 +158,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 		{
 			name:          "registry put error",
 			request:       req,
-			registry:      &errRegistry{get: omnissm.ErrRegistrationNotFound, put: fatalError},
+			registry:      &errRegistry{get: ErrRegistrationNotFound, put: fatalError},
 			newActivation: func(name string) (*ssm.Activation, error) { return &activationEntry.Activation, nil },
 			checkError:    isError(fatalError),
 		},
@@ -202,21 +201,21 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 }
 
 func TestOmniSSMConfirmRegistration(t *testing.T) {
-	req := &omnissm.RegistrationRequest{
-		SecureIdentity: omnissm.SecureIdentity{
-			InstanceIdentity: &omnissm.InstanceIdentity{
+	req := &RegistrationRequest{
+		SecureIdentity: SecureIdentity{
+			InstanceIdentity: &InstanceIdentity{
 				AccountId:  "my_account",
 				InstanceId: "i-0123456789012345",
 			},
 		},
 	}
-	entry := &omnissm.RegistrationEntry{
+	entry := &RegistrationEntry{
 		Id:         req.Hash(),
 		ManagedId:  "",
 		AccountId:  req.AccountId,
 		InstanceId: req.InstanceId,
 	}
-	managedEntry := &omnissm.RegistrationEntry{
+	managedEntry := &RegistrationEntry{
 		Id:         req.Hash(),
 		ManagedId:  "mi-12345",
 		AccountId:  req.AccountId,
@@ -227,7 +226,7 @@ func TestOmniSSMConfirmRegistration(t *testing.T) {
 		name string
 		registry
 		id, mid    string
-		wantEntry  *omnissm.RegistrationEntry
+		wantEntry  *RegistrationEntry
 		checkError func(error) bool
 	}{
 		{
@@ -242,7 +241,7 @@ func TestOmniSSMConfirmRegistration(t *testing.T) {
 			registry:   newMockRegistry(),
 			id:         entry.Id,
 			mid:        "mi-12345",
-			checkError: isError(omnissm.ErrRegistrationNotFound),
+			checkError: isError(ErrRegistrationNotFound),
 		},
 		{
 			name:       "empty mid",
@@ -287,7 +286,7 @@ func TestOmniSSMConfirmRegistration(t *testing.T) {
 }
 
 func TestOmniSSMDeregisterInstance(t *testing.T) {
-	existingEntry := &omnissm.RegistrationEntry{
+	existingEntry := &RegistrationEntry{
 		Id:        "1",
 		ManagedId: "mi-123",
 		AccountId: "account",
@@ -296,7 +295,7 @@ func TestOmniSSMDeregisterInstance(t *testing.T) {
 
 	cases := []struct {
 		name                      string
-		entry                     *omnissm.RegistrationEntry
+		entry                     *RegistrationEntry
 		registry                  registry
 		deregisterManagedInstance func(string) error
 		wantDeferred              *DeferredActionMessage
@@ -328,12 +327,12 @@ func TestOmniSSMDeregisterInstance(t *testing.T) {
 			name:       "instance does not exist",
 			entry:      existingEntry,
 			registry:   newMockRegistry(),
-			checkError: isCausedBy(omnissm.ErrRegistrationNotFound),
+			checkError: isCausedBy(ErrRegistrationNotFound),
 		},
 		{
 			name:       "instance in registry only",
 			entry:      existingEntry,
-			checkError: isCausedBy(omnissm.ErrRegistrationNotFound),
+			checkError: isCausedBy(ErrRegistrationNotFound),
 			registry:   newMockRegistry(existingEntry),
 
 			deregisterManagedInstance: func(id string) error { return ssm.ErrInvalidInstance },
@@ -419,7 +418,7 @@ func TestOmniSSMDeregisterInstance(t *testing.T) {
 }
 
 func TestOmniSSMTagInstance(t *testing.T) {
-	entry := &omnissm.RegistrationEntry{
+	entry := &RegistrationEntry{
 		Id:        "1",
 		ManagedId: "mi-123",
 		AccountId: "account",
@@ -452,7 +451,7 @@ func TestOmniSSMTagInstance(t *testing.T) {
 			name:       "tag unkown",
 			tags:       &ssm.ResourceTags{ManagedId: "unknown"},
 			registry:   newMockRegistry(entry),
-			checkError: isCausedBy(omnissm.ErrRegistrationNotFound),
+			checkError: isCausedBy(ErrRegistrationNotFound),
 		},
 		{
 			name:       "registry error",
@@ -522,7 +521,7 @@ func TestOmniSSMTagInstance(t *testing.T) {
 }
 
 func TestOmniSSMPutInstanceInventory(t *testing.T) {
-	entry := &omnissm.RegistrationEntry{
+	entry := &RegistrationEntry{
 		Id:        "1",
 		ManagedId: "mi-123",
 		AccountId: "account",
@@ -556,7 +555,7 @@ func TestOmniSSMPutInstanceInventory(t *testing.T) {
 			name:       "inventory unknown",
 			inv:        &ssm.CustomInventory{ManagedId: "unknown"},
 			registry:   newMockRegistry(entry),
-			checkError: isCausedBy(omnissm.ErrRegistrationNotFound),
+			checkError: isCausedBy(ErrRegistrationNotFound),
 		},
 		{
 			name:       "registry error",
@@ -731,28 +730,28 @@ func mockQueue(d **DeferredActionMessage) mockQueueFunc {
 
 type mockRegistry struct {
 	mu      sync.RWMutex
-	entries map[string]*omnissm.RegistrationEntry
+	entries map[string]*RegistrationEntry
 }
 
-func newMockRegistry(ee ...*omnissm.RegistrationEntry) *mockRegistry {
-	m := make(map[string]*omnissm.RegistrationEntry)
+func newMockRegistry(ee ...*RegistrationEntry) *mockRegistry {
+	m := make(map[string]*RegistrationEntry)
 	for _, e := range ee {
 		m[e.Id] = e
 	}
 	return &mockRegistry{entries: m}
 }
 
-func (r *mockRegistry) Get(ctx context.Context, id string) (*omnissm.RegistrationEntry, error) {
+func (r *mockRegistry) Get(ctx context.Context, id string) (*RegistrationEntry, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	e, ok := r.entries[id]
 	if !ok {
-		return nil, omnissm.ErrRegistrationNotFound
+		return nil, ErrRegistrationNotFound
 	}
 	return e, nil
 }
 
-func (r *mockRegistry) GetByManagedId(ctx context.Context, mid string) (*omnissm.RegistrationEntry, error) {
+func (r *mockRegistry) GetByManagedId(ctx context.Context, mid string) (*RegistrationEntry, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for _, e := range r.entries {
@@ -760,14 +759,14 @@ func (r *mockRegistry) GetByManagedId(ctx context.Context, mid string) (*omnissm
 			return e, nil
 		}
 	}
-	return nil, omnissm.ErrRegistrationNotFound
+	return nil, ErrRegistrationNotFound
 }
 
-func (r *mockRegistry) Put(ctx context.Context, e *omnissm.RegistrationEntry) error {
+func (r *mockRegistry) Put(ctx context.Context, e *RegistrationEntry) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.entries == nil {
-		r.entries = make(map[string]*omnissm.RegistrationEntry)
+		r.entries = make(map[string]*RegistrationEntry)
 	}
 	r.entries[e.Id] = e
 	return nil
@@ -785,7 +784,7 @@ func (r *mockRegistry) SetManagedId(ctx context.Context, id, mid string) error {
 	defer r.mu.Unlock()
 	e, ok := r.entries[id]
 	if !ok {
-		return omnissm.ErrRegistrationNotFound
+		return ErrRegistrationNotFound
 	}
 	e.ManagedId = mid
 	return nil
@@ -796,7 +795,7 @@ func (r *mockRegistry) SetTagged(ctx context.Context, id string, b bool) error {
 	defer r.mu.Unlock()
 	e, ok := r.entries[id]
 	if !ok {
-		return omnissm.ErrRegistrationNotFound
+		return ErrRegistrationNotFound
 	}
 	if b {
 		e.IsTagged = 1
@@ -811,7 +810,7 @@ func (r *mockRegistry) SetInventoried(ctx context.Context, id string, b bool) er
 	defer r.mu.Unlock()
 	e, ok := r.entries[id]
 	if !ok {
-		return omnissm.ErrRegistrationNotFound
+		return ErrRegistrationNotFound
 	}
 	if b {
 		e.IsInventoried = 1
@@ -823,21 +822,21 @@ func (r *mockRegistry) SetInventoried(ctx context.Context, id string, b bool) er
 
 // mock for returning errors from registry methods
 type errRegistry struct {
-	entry *omnissm.RegistrationEntry
+	entry *RegistrationEntry
 
 	get, getByManagedId, put, delete        error
 	setManagedId, setTagged, setInventoried error
 }
 
-func (r *errRegistry) Get(ctx context.Context, id string) (*omnissm.RegistrationEntry, error) {
+func (r *errRegistry) Get(ctx context.Context, id string) (*RegistrationEntry, error) {
 	return r.entry, r.get
 }
 
-func (r *errRegistry) GetByManagedId(ctx context.Context, mid string) (*omnissm.RegistrationEntry, error) {
+func (r *errRegistry) GetByManagedId(ctx context.Context, mid string) (*RegistrationEntry, error) {
 	return r.entry, r.getByManagedId
 }
 
-func (r *errRegistry) Put(ctx context.Context, e *omnissm.RegistrationEntry) error {
+func (r *errRegistry) Put(ctx context.Context, e *RegistrationEntry) error {
 	return r.put
 }
 

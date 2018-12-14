@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package omnissmapi_test
+package omnissm_test
 
 import (
 	"testing"
 
-	api "github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm/omnissmapi"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm"
 )
 
 func TestRequestVersionValid(t *testing.T) {
@@ -44,10 +44,10 @@ func TestRequestVersionValid(t *testing.T) {
 	}
 
 	for i, tc := range testCases {
-		c := &api.Config{
+		c := &omnissm.Config{
 			ClientVersionConstraints: tc.constraint,
 		}
-		api.MergeConfig(c, &api.Config{})
+		omnissm.MergeConfig(c, &omnissm.Config{})
 		if got := c.RequestVersionValid(tc.clientVersion); got != tc.expected {
 			t.Errorf("TestCase %d: version %#v constraint %#v (got %t, want %t)", i, tc.clientVersion, tc.constraint, got, tc.expected)
 		}
