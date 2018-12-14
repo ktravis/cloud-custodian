@@ -292,9 +292,7 @@ func TestRegistrationsGet(t *testing.T) {
 					} else if errors.Cause(err) != omnissm.ErrRegistrationNotFound {
 						t.Errorf("expected ErrRegistrationNotFound, got %v", err)
 					}
-					return
-				}
-				if err != nil {
+				} else if err != nil {
 					t.Fatal(err)
 				}
 				if d := cmp.Diff(resp, c.entry); d != "" {
@@ -311,8 +309,7 @@ func TestRegistrationsGet(t *testing.T) {
 						t.Errorf("expected ErrRegistrationNotFound, got %v", err)
 					}
 					return
-				}
-				if err != nil {
+				} else if err != nil {
 					t.Fatal(err)
 				}
 				if d := cmp.Diff(resp, c.entry); d != "" {
