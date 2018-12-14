@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/configservice"
 	"github.com/aws/aws-sdk-go/service/configservice/configserviceiface"
+	"github.com/aws/aws-xray-sdk-go/xray"
 	"github.com/golang/time/rate"
 	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
@@ -34,7 +35,8 @@ import (
 type Config struct {
 	*aws.Config
 
-	AssumeRole string
+	AssumeRole    string
+	EnableTracing bool
 }
 
 type ConfigService struct {
@@ -49,8 +51,12 @@ func New(config *Config) *ConfigService {
 	if config.AssumeRole != "" {
 		config.Config.WithCredentials(stscreds.NewCredentials(sess, config.AssumeRole))
 	}
+	svc := configservice.New(session.New(config.Config))
+	if config.EnableTracing {
+		xray.AWS(svc.Client)
+	}
 	c := &ConfigService{
-		ConfigServiceAPI:  configservice.New(session.New(config.Config)),
+		ConfigServiceAPI:  svc,
 		config:            config,
 		configServiceRate: rate.NewLimiter(100, 100),
 	}
