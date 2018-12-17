@@ -15,7 +15,6 @@
 package omnissm
 
 import (
-	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -23,26 +22,24 @@ import (
 	"strings"
 
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/awsutil"
-	version "github.com/hashicorp/go-version"
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v2"
 )
 
-const DefaultSSMServiceRole = "service-role/AmazonEC2RunCommandRoleForManagedInstances"
+var (
+	DefaultMaxRetries         = 0
+	DefaultRegistrationsTable = "omnissm-registrations"
+	DefaultSSMServiceRole     = "service-role/AmazonEC2RunCommandRoleForManagedInstances"
+	DefaultResourceTags       = []string{
+		"App",
+		"OwnerContact",
+		"Name",
+	}
+)
 
 type Config struct {
-	AWSConfig *awsutil.Config
-
-	Context context.Context
-
 	// A whitelist of accounts allowed to register with SSM
 	AccountWhitelist []string `yaml:"accountWhitelist"`
-
-	// This or AssumeRoles must be specified.
-	AssumeRoleName string `yaml:"assumeRole"`
-
-	// A mapping of IAM roles to assume with the provided accounts
-	AssumeRoles map[string]string `yaml:"assumeRoles"`
 
 	// The IAM role used when the SSM agent registers with the SSM service
 	InstanceRole string `yaml:"instanceRole"`
@@ -78,17 +75,20 @@ type Config struct {
 
 	// This is set by AWS when a Lambda instance is configured to use x-ray.
 	// This is optional and x-ray is currently only supported when using lambda.
-	XRayTracingEnabled string `yaml:"xrayTracingEnabled"`
-
-	// The number of days to wait to clean up registered ssm instances that have a
-	// PingStatus of ConnectionLost
-	CleanupAfterDays float64 `yaml:"cleanupAfterDays"`
+	XRayTracingEnabled bool `yaml:"xrayTracingEnabled"`
 
 	// Version constraints for allowable client requests during registration. If
 	// constraints are empty, all versions are allowed. Version string should
 	// conform with github.com/hashicorp/go-version format, i.e. comma-separated
 	// rules like ">= 1.1.0, < 2.0.0"
 	ClientVersionConstraints string `yaml:"clientVersionConstraints"`
+
+	// The role to assume in registering accounts
+	ConfigServiceAssumeRoleName string `yaml:"assumeRole"`
+
+	// The number of days to wait to clean up registered ssm instances that have a
+	// PingStatus of ConnectionLost
+	CleanupAfterDays float64 `yaml:"cleanupAfterDays"`
 
 	// The name of a JSON file containing an ImageWhitelist structure. If the
 	// value is not an empty string, the registration handler will attempt to
@@ -97,50 +97,43 @@ type Config struct {
 	// identity document with an image ID not present in the whitelist will not
 	// be allowed to register.
 	AMIWhitelistFile string `yaml:"amiWhitelistFile"`
-
-	authorizedAccountIds map[string]struct{}
-	resourceTags         map[string]struct{}
-	roleMap              map[string]string
-	versionConstraint    version.Constraints
 }
 
-func NewConfig() *Config {
-	c := &Config{}
-	MergeConfig(c, ReadConfigFromEnv())
-	return c
-}
-
-type ImageWhitelist struct {
-	Images []struct {
-		AccountId   string `json:"AccountId"`
-		RegionName  string `json:"RegionName"`
-		ImageId     string `json:"ImageId"`
-		ReleaseDate string `json:"ReleaseDate"`
-	} `json:"Images"`
+func DefaultConfig() *Config {
+	return &Config{
+		MaxRetries:         DefaultMaxRetries,
+		RegistrationsTable: DefaultRegistrationsTable,
+		InstanceRole:       DefaultSSMServiceRole,
+		ResourceTags:       DefaultResourceTags,
+	}
 }
 
 // ReadConfig loads configuration values from a yaml file.
 // The priority of the sources is the following:
-// 1. flags
-// 2. environment variables
-// 3. config file
-// 4. defaults
+// 1. environment variables
+// 2. config file
+// 3. defaults
 func ReadConfig(path string) (*Config, error) {
+	c := DefaultConfig()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, errors.Wrapf(err, "%#v not found", path)
+		return nil, errors.Wrapf(err, "config file %#v not found", path)
 	}
 	data, err := ioutil.ReadFile(path)
 	if err != nil {
-		return nil, errors.Wrapf(err, "cannot read file: %#v", path)
+		return nil, errors.Wrapf(err, "cannot read config file %#v", path)
 	}
+	if err := yaml.Unmarshal(data, c); err != nil {
+		return nil, errors.Wrap(err, "cannot unmarshal config data")
+	}
+	return c.ReadEnv(), nil
+}
 
-	var c Config
-	if err := yaml.Unmarshal(data, &c); err != nil {
-		return nil, errors.Wrap(err, "cannot unmarshal")
+func (c *Config) AWSConfig() *awsutil.Config {
+	return &awsutil.Config{
+		EnableTracing: config.XRayTracingEnabled,
+		MaxRetries:    config.MaxRetries,
+		Region:        config.Region,
 	}
-	MergeConfig(&c, ReadConfigFromEnv())
-	c.setDefaults()
-	return &c, nil
 }
 
 // splitNonEmpty returns a nil slice when s is blank
@@ -151,129 +144,55 @@ func splitNonEmpty(s string, sep string) []string {
 	return strings.Split(s, sep)
 }
 
-func ReadConfigFromEnv() *Config {
-	maxRetries, _ := strconv.Atoi(os.Getenv("OMNISSM_MAX_RETRIES"))
-	c := &Config{
-		AccountWhitelist:           splitNonEmpty(os.Getenv("OMNISSM_ACCOUNT_WHITELIST"), ","),
-		InstanceRole:               os.Getenv("OMNISSM_INSTANCE_ROLE"),
-		MaxRetries:                 maxRetries,
-		RegistrationsTable:         os.Getenv("OMNISSM_REGISTRATIONS_TABLE"),
-		QueueName:                  os.Getenv("OMNISSM_SPILLOVER_QUEUE"),
-		ResourceRegisteredSNSTopic: os.Getenv("OMNISSM_RESOURCE_REGISTERED_SNS_TOPIC"),
-		ResourceDeletedSNSTopic:    os.Getenv("OMNISSM_RESOURCE_DELETED_SNS_TOPIC"),
-		ResourceTags:               splitNonEmpty(os.Getenv("OMNISSM_RESOURCE_TAGS"), ","),
-		S3DownloadRole:             os.Getenv("OMNISSM_S3_DOWNLOAD_ROLE"),
-		SNSPublishRole:             os.Getenv("OMNISSM_SNS_PUBLISH_ROLE"),
-		XRayTracingEnabled:         os.Getenv("_X_AMZN_TRACE_ID"),
+func (c *Config) ReadEnv() *Config {
+	if aw := splitNonEmpty(os.Getenv("OMNISSM_ACCOUNT_WHITELIST"), ","); len(aw) > 0 {
+		c.AccountWhitelist = aw
+	}
+	if s := os.Getenv("OMNISSM_MAX_RETRIES"); s != "" {
+		maxRetries, err := strconv.Atoi(s)
+		if err != nil {
+			panic(fmt.Sprintf("invalid max retry count %#v", s))
+		}
+		c.MaxRetries = maxRetries
+	}
+	if s := os.Getenv("OMNISSM_INSTANCE_ROLE"); s != "" {
+		c.InstanceRole = s
+	}
+	if s := os.Getenv("OMNISSM_REGISTRATIONS_TABLE"); s != "" {
+		c.RegistrationsTable = s
+	}
+	if s := os.Getenv("OMNISSM_SPILLOVER_QUEUE"); s != "" {
+		c.QueueName = s
+	}
+	if s := os.Getenv("OMNISSM_RESOURCE_REGISTERED_SNS_TOPIC"); s != "" {
+		c.ResourceRegisteredSNSTopic = s
+	}
+	if s := os.Getenv("OMNISSM_RESOURCE_DELETED_SNS_TOPIC"); s != "" {
+		c.ResourceDeletedSNSTopic = s
+	}
+	if rt := splitNonEmpty(os.Getenv("OMNISSM_RESOURCE_TAGS"), ","); len(rt) > 0 {
+		c.ResourceTags = rt
+	}
+	if s := os.Getenv("OMNISSM_S3_DOWNLOAD_ROLE"); s != "" {
+		c.S3DownloadRole = s
+	}
+	if s := os.Getenv("OMNISSM_SNS_PUBLISH_ROLE"); s != "" {
+		c.SNSPublishRole = s
+	}
+	if s := os.Getenv("_X_AMZN_TRACE_ID"); s != "" {
+		c.XRayTracingEnabled = true
 	}
 	return c
 }
 
-func MergeConfig(config *Config, other *Config) {
-	if len(other.AccountWhitelist) > 0 {
-		config.AccountWhitelist = other.AccountWhitelist
-		config.authorizedAccountIds = nil
-	}
-	if other.InstanceRole != "" {
-		config.InstanceRole = other.InstanceRole
-	}
-	if other.MaxRetries != 0 {
-		config.MaxRetries = other.MaxRetries
-	}
-	if other.QueueName != "" {
-		config.QueueName = other.QueueName
-	}
-	if other.RegistrationsTable != "" {
-		config.RegistrationsTable = other.RegistrationsTable
-	}
-	if other.ResourceRegisteredSNSTopic != "" {
-		config.ResourceRegisteredSNSTopic = other.ResourceRegisteredSNSTopic
-	}
-	if other.ResourceDeletedSNSTopic != "" {
-		config.ResourceDeletedSNSTopic = other.ResourceDeletedSNSTopic
-	}
-	if len(other.ResourceTags) > 0 {
-		config.ResourceTags = other.ResourceTags
-		config.resourceTags = nil
-	}
-	if other.S3DownloadRole != "" {
-		config.S3DownloadRole = other.S3DownloadRole
-	}
-	if other.SNSPublishRole != "" {
-		config.SNSPublishRole = other.SNSPublishRole
-	}
-	if other.ClientVersionConstraints != "" {
-		config.ClientVersionConstraints = other.ClientVersionConstraints
-	}
-	config.setDefaults()
-}
-
-func (c *Config) setDefaults() {
-	if c.InstanceRole == "" {
-		c.InstanceRole = DefaultSSMServiceRole
-	}
-	if c.RegistrationsTable == "" {
-		c.RegistrationsTable = "omnissm-registrations"
-	}
-	if len(c.ResourceTags) == 0 {
-		c.ResourceTags = []string{"App", "OwnerContact", "Name"}
-	}
-	if c.ClientVersionConstraints != "" {
-		cs, err := version.NewConstraint(c.ClientVersionConstraints)
-		if err == nil {
-			c.versionConstraint = cs
+func (c *Config) HasResourceTag(tagName string) (ok bool) {
+	// This list is expected to be very small, so it is probably acceptable to
+	// do a linear search here in order for *Config to remain free of internal
+	// state. If not, the caller should make a map to check.
+	for _, t := range c.ResourceTags {
+		if t == tagName {
+			return true
 		}
 	}
-	if c.roleMap == nil {
-		c.roleMap = make(map[string]string)
-	}
-	for accountId, roleName := range c.AssumeRoles {
-		c.roleMap[accountId] = fmt.Sprintf("arn:aws:iam::%s:role/%s", accountId, roleName)
-	}
-	if c.authorizedAccountIds == nil {
-		c.authorizedAccountIds = make(map[string]struct{})
-	}
-	for _, accountId := range c.AccountWhitelist {
-		c.authorizedAccountIds[accountId] = struct{}{}
-	}
-	if c.resourceTags == nil {
-		c.resourceTags = make(map[string]struct{})
-	}
-	for _, t := range c.ResourceTags {
-		c.resourceTags[t] = struct{}{}
-	}
-	c.AWSConfig = &awsutil.Config{
-		MaxRetries: c.MaxRetries,
-	}
-}
-
-func (c *Config) RequestVersionValid(vs string) bool {
-	if c.versionConstraint == nil {
-		return true
-	} else if vs == "" {
-		return false
-	}
-	v, err := version.NewVersion(vs)
-	if err != nil {
-		return false
-	}
-	return c.versionConstraint.Check(v)
-}
-
-func (c *Config) HasAssumeRole(accountId string) (roleArn string, ok bool) {
-	if c.AssumeRoleName != "" {
-		return fmt.Sprintf("arn:aws:iam::%s:role/%s", accountId, c.AssumeRoleName), true
-	}
-	roleArn, ok = c.roleMap[accountId]
-	return
-}
-
-func (c *Config) HasResourceTag(tagName string) (ok bool) {
-	_, ok = c.resourceTags[tagName]
-	return
-}
-
-func (c *Config) IsAuthorized(accountId string) (ok bool) {
-	_, ok = c.authorizedAccountIds[accountId]
-	return
+	return false
 }

@@ -55,6 +55,8 @@ func removeTimestampMilliseconds(s string) string {
 type configChangeHandler struct {
 	*omnissm.OmniSSM
 	*sns.SNS
+
+	config *omnissm.Config
 }
 
 func (h *configChangeHandler) handleConfigurationItemChange(ctx context.Context, detail configservice.ConfigurationItemDetail) error {
@@ -119,12 +121,12 @@ func (h *configChangeHandler) handleConfigurationItemChange(ctx context.Context,
 			return err
 		}
 		log.Info().Msgf("Successfully deregistered instance: %#v", entry.ManagedId)
-		if h.OmniSSM.config.ResourceDeletedSNSTopic != "" {
+		if h.config.ResourceDeletedSNSTopic != "" {
 			data, err := json.Marshal(entry)
 			if err != nil {
 				return errors.Wrap(err, "cannot marshal notification")
 			}
-			if err := h.SNS.Publish(ctx, h.OmniSSM.config.ResourceDeletedSNSTopic, data); err != nil {
+			if err := h.SNS.Publish(ctx, h.config.ResourceDeletedSNSTopic, data); err != nil {
 				return err
 			}
 		}
@@ -156,16 +158,10 @@ func main() {
 
 	h := &configChangeHandler{
 		OmniSSM: omni,
-		S3: s3.New(&s3.Config{
-			EnableTracing: config.XRayTracingEnabled,
-			AssumeRole:    config.S3DownloadRole,
-		}),
-		SNS: sns.New(&sns.Config{
-			Config:        config.Config,
-			AssumeRole:    config.SNSPublishRole,
-			EnableTracing: config.XRayTracingEnabled != "",
-		}),
+		SNS:     sns.New(config.AWSConfig().WithAssumeRole(config.SNSPublishRole)),
+		config:  config,
 	}
+	svc := s3.New(config.AWSConfig().WithAssumeRole(config.S3DownloadRole))
 
 	lambda.Start(func(ctx context.Context, event cloudWatchEvent) (err error) {
 		if event.Source != "aws.config" {

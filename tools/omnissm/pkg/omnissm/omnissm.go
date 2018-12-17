@@ -57,18 +57,19 @@ type OmniSSM struct {
 }
 
 func New(config *Config) (*OmniSSM, error) {
+	awsconf := config.AWSConfig()
 	o := &OmniSSM{
 		config: config,
 		registry: NewRegistrations(&RegistrationsConfig{
-			AWSConfig: config.AWSConfig,
+			AWSConfig: awsconf,
 			TableName: config.RegistrationsTable,
 		}),
-		ssmAPI: ssm.New(config.AWSConfig),
+		ssmAPI: ssm.New(awsconf),
 	}
 	if config.QueueName != "" {
 		var err error
 		o.deferQueue, err = sqs.NewQueue(&sqs.Config{
-			AWSConfig: config.AWSConfig,
+			AWSConfig: awsconf,
 			QueueName: config.QueueName,
 			//MessageGroupId: "omnissm-event-stream",
 		})

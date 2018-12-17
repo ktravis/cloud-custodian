@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -29,17 +30,6 @@ import (
 
 var omni *omnissm.OmniSSM
 
-func init() {
-	config, err := omnissm.ReadConfig("config.yaml")
-	if err != nil {
-		panic(err)
-	}
-	omni, err = omnissm.New(config)
-	if err != nil {
-		panic(err)
-	}
-}
-
 func groupEntriesByAccountIdAndRegion(entries []*omnissm.RegistrationEntry) map[string][]*omnissm.RegistrationEntry {
 	entriesByKey := make(map[string][]*omnissm.RegistrationEntry)
 	for _, entry := range entries {
@@ -49,6 +39,14 @@ func groupEntriesByAccountIdAndRegion(entries []*omnissm.RegistrationEntry) map[
 }
 
 func main() {
+	config, err := omnissm.ReadConfig("config.yaml")
+	if err != nil {
+		panic(err)
+	}
+	omni, err = omnissm.New(config)
+	if err != nil {
+		panic(err)
+	}
 	lambda.Start(func(ctx context.Context) error {
 		entries, err := omni.Registrations.QueryIndexes(ctx, []omnissm.QueryIndexInput{
 			{"IsTagged-index", "IsTagged", "0"},
@@ -65,16 +63,12 @@ func main() {
 			go func(awsConfig *aws.Config, accountId string, entries []*omnissm.RegistrationEntry) {
 				defer wg.Done()
 
-				// if the accountId is not in the roleMap, the lambda execution
-				// role will be used
-				roleArn, ok := omni.HasAssumeRole(accountId)
-				if !ok {
-					log.Info().Msgf("account %#v not found in role map", accountId)
+				awsconf := config.AWSConfig()
+				if config.ConfigServiceAssumeRoleName != "" {
+					awsconf.AssumeRole = fmt.Sprintf("arn:aws:iam::%s:role/%s", accountId, c.ConfigServiceAssumeRoleName)
+					log.Info().Msgf("assumeing role %#v", awsconf.AssumeRole)
 				}
-				cs := configservice.New(&configservice.Config{
-					Config:     awsConfig,
-					AssumeRole: roleArn,
-				})
+				cs := configservice.New(awsconf)
 				var i, j int
 				for _, entry := range entries {
 					ci, err := cs.GetLatestResourceConfig(ctx, "AWS::EC2::Instance", entry.InstanceId)

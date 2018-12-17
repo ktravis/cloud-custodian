@@ -18,14 +18,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 
-	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/awsutil"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/lambda"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/sns"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
@@ -93,28 +90,17 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	var amiWhitelist map[string]bool
-	if config.AMIWhitelistFile != "" {
-		b, err := ioutil.ReadFile(config.AMIWhitelistFile)
-		if err != nil {
-			panic(fmt.Sprintf("unable to read AMI whitelist: %v", err))
-		}
-		var tmp omnissm.ImageWhitelist
-		if err := json.Unmarshal(b, &tmp); err != nil {
-			panic(fmt.Sprintf("unable to unmarshal AMI whitelist file: %v", err))
-		}
-		amiWhitelist = make(map[string]bool)
-		for _, i := range tmp.Images {
-			amiWhitelist[strings.Join([]string{i.AccountId, i.RegionName, i.ImageId}, ",")] = true
-		}
+	if len(config.AccountWhitelist) == 0 {
+		panic("no account whitelist provided")
 	}
-	r := registrationHandler{
+	h := registrationHandler{
 		OmniSSM: omni,
-		SNS: sns.New(&awsutil.Config{
-			AssumeRole:    config.SNSPublishRole,
-			EnableTracing: config.AWSConfig.EnableTracing,
-		}),
-		config: config,
+		SNS:     sns.New(config.AWSConfig.WithAssumeRole(config.SNSPublishRole)),
+		config:  config,
+	}
+	auth, err := omnissm.NewRequestAuthorizer(config)
+	if err != nil {
+		panic(err)
 	}
 	lambda.Start(func(ctx context.Context, req events.APIGatewayProxyRequest) (*events.APIGatewayProxyResponse, error) {
 		switch req.Resource {
@@ -128,24 +114,24 @@ func main() {
 				log.Error().Err(err).Msg("cannot verify request")
 				return nil, lambda.BadRequestError{}
 			}
-			if a := registerReq.AccountId; !config.IsAuthorized(a) {
-				return nil, lambda.UnauthorizedError{fmt.Sprintf("account not authorized: %#v", a)}
-			}
-			if !r.config.RequestVersionValid(registerReq.ClientVersion) {
-				return nil, lambda.BadRequestError{fmt.Sprintf("client version does not meet constraints %#v", r.config.ClientVersionConstraints)}
-			}
-			if amiWhitelist != nil {
-				k := strings.Join([]string{registerReq.AccountId, registerReq.Region, registerReq.ImageId}, ",")
-				if registerReq.ImageId == "" || !amiWhitelist[k] {
+			if err := auth.CheckRequest(&registerReq); err != nil {
+				switch errors.Cause(err) {
+				case omnissm.ErrAccountNotAuthorized:
+					return nil, lambda.UnauthorizedError{fmt.Sprintf("account not authorized: %#v", registerReq.AccountId)}
+				case omnissm.ErrClientVersionNotAuthorized:
+					return nil, lambda.BadRequestError{fmt.Sprintf("client version does not meet constraints %#v", h.config.ClientVersionConstraints)}
+				case omnissm.ErrImageNotAuthorized:
 					return nil, lambda.BadRequestError{fmt.Sprintf("registration from AMI %#v is not permitted", registerReq.ImageId)}
+				default:
+					return nil, lambda.BadRequestError{}
 				}
 			}
 
 			switch req.HTTPMethod {
 			case "POST":
-				return lambda.JSON(r.RequestActivation(ctx, &registerReq))
+				return lambda.JSON(h.RequestActivation(ctx, &registerReq))
 			case "PATCH":
-				return lambda.JSON(r.UpdateRegistration(ctx, &registerReq))
+				return lambda.JSON(h.UpdateRegistration(ctx, &registerReq))
 			}
 		}
 		return nil, lambda.NotFoundError{fmt.Sprintf("cannot find resource %#v", req.Resource)}

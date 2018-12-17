@@ -33,6 +33,11 @@ type Config struct {
 	EnableTracing bool
 }
 
+func (c *Config) WithAssumeRole(r string) *Config {
+	c.AssumeRole = r
+	return c
+}
+
 func Session(c *Config) *session.Session {
 	if c == nil {
 		return session.New(aws.NewConfig().WithMaxRetries(DefaultMaxRetries))

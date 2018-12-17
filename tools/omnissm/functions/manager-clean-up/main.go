@@ -25,24 +25,18 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-var (
-	omni *omnissm.OmniSSM
-)
-
-func init() {
+func main() {
 	config, err := omnissm.ReadConfig("config.yaml")
 	if err != nil {
 		panic(err)
 	}
-	omni, err = omnissm.New(config)
+	omni, err := omnissm.New(config)
 	if err != nil {
 		panic(err)
 	}
-}
-
-func main() {
+	svc := ssm.New(config.AWSConfig())
 	lambda.Start(func(ctx context.Context) (err error) {
-		output, err := omni.SSM.DescribeInstanceInformationWithContext(ctx, &ssm.DescribeInstanceInformationInput{
+		output, err := svc.DescribeInstanceInformationWithContext(ctx, &ssm.DescribeInstanceInformationInput{
 			InstanceInformationFilterList: []*ssm.InstanceInformationFilter{
 				{
 					Key:      aws.String("PingStatus"),
@@ -55,7 +49,7 @@ func main() {
 		}
 		for _, element := range output.InstanceInformationList {
 			if (time.Since(element.LastPingDateTime.UTC()).Hours() / 24) > omni.Config.CleanupAfterDays {
-				entry, err, ok := omni.Registrations.GetByManagedId(ctx, *element.InstanceId)
+				entry, err, ok := omni.GetByManagedId(ctx, *element.InstanceId)
 				if err != nil {
 					log.Error().Err(err)
 					continue
@@ -68,7 +62,7 @@ func main() {
 					log.Info().Msgf("Successfully deregistered instance: %#v", entry.ManagedId)
 				} else {
 					//entry not found, just clean up ssm registry
-					if err := omni.SSM.DeregisterManagedInstance(ctx, *element.InstanceId); err != nil {
+					if err := svc.DeregisterManagedInstance(ctx, *element.InstanceId); err != nil {
 						// if we fail here, log and try again with next run
 						log.Error().Err(err)
 					} else {
