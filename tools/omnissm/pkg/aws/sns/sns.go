@@ -18,35 +18,30 @@ import (
 	"context"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/aws/aws-sdk-go/service/sns/snsiface"
 	"github.com/aws/aws-xray-sdk-go/xray"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/awsutil"
 	"github.com/golang/time/rate"
 	"github.com/pkg/errors"
 )
 
-type Config struct {
-	*aws.Config
+//type Config struct {
+//*aws.Config
 
-	AssumeRole    string
-	EnableTracing bool
-}
+//AssumeRole    string
+//EnableTracing bool
+//}
 
 type SNS struct {
 	snsiface.SNSAPI
 
-	config  *Config
+	config  *awsutil.Config
 	snsRate *rate.Limiter
 }
 
-func New(config *Config) *SNS {
-	sess := session.New(config.Config)
-	if config.AssumeRole != "" {
-		config.Config.WithCredentials(stscreds.NewCredentials(sess, config.AssumeRole))
-	}
-	svc := sns.New(session.New(config.Config))
+func New(config *awsutil.Config) *SNS {
+	svc := sns.New(awsutil.Session(config))
 	if config.EnableTracing {
 		xray.AWS(svc.Client)
 	}

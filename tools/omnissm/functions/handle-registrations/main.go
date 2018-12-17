@@ -22,11 +22,12 @@ import (
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
-	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/awsutil"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/lambda"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/sns"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/omnissm"
 )
@@ -34,11 +35,13 @@ import (
 type registrationHandler struct {
 	*omnissm.OmniSSM
 	*sns.SNS
+
+	config *omnissm.Config
 }
 
 func (r *registrationHandler) RequestActivation(ctx context.Context, req *omnissm.RegistrationRequest) (*omnissm.RegistrationResponse, error) {
 	logger := log.With().Str("handler", "RequestActivation").Logger()
-	logger.Info().Interface("request", req).Interface("identity", req.Identity()).Msg("new registration request")
+	logger.Info().Interface("request", req).Msg("new registration request")
 	resp, err := r.OmniSSM.RequestActivation(ctx, req)
 	if err != nil {
 		return nil, err
@@ -53,15 +56,15 @@ func (r *registrationHandler) RequestActivation(ctx context.Context, req *omniss
 
 func (r *registrationHandler) UpdateRegistration(ctx context.Context, req *omnissm.RegistrationRequest) (*omnissm.RegistrationResponse, error) {
 	logger := log.With().Str("handler", "UpdateRegistration").Logger()
-	logger.Info().Interface("request", req).Interface("identity", req.Identity()).Msg("update registration request")
-	id := req.Identity().Hash()
-	entry, err := r.OmniSSM.ConfirmRegistration(ctx, id, req.ManagedId, true)
+	logger.Info().Interface("request", req).Msg("update registration request")
+	id := req.Hash()
+	entry, err := r.OmniSSM.ConfirmRegistration(ctx, id, req.ManagedId)
 	if err != nil {
 		switch errors.Cause(err) {
 		case ssm.ErrInvalidInstance:
 			err = lambda.BadRequestError{fmt.Sprintf("invalid managedId %#v", req.ManagedId)}
 		case omnissm.ErrRegistrationNotFound:
-			logger.Info().Str("instanceName", req.Identity().Name()).Str("id", id).Msg("registration entry not found")
+			logger.Info().Str("instanceName", req.Name()).Str("id", id).Msg("registration entry not found")
 			err = lambda.NotFoundError{fmt.Sprintf("entry not found: %#v", id)}
 		default:
 			logger.Error().Interface("regquest", req).Err(err).Msg("error confirming registration")
@@ -69,7 +72,7 @@ func (r *registrationHandler) UpdateRegistration(ctx context.Context, req *omnis
 		return nil, err
 	}
 	logger.Info().Interface("entry", entry).Msg("registration entry updated")
-	if t := r.OmniSSM.Config.ResourceRegisteredSNSTopic; t != "" {
+	if t := r.config.ResourceRegisteredSNSTopic; t != "" {
 		if data, err := json.Marshal(entry); err == nil {
 			if err := r.Publish(ctx, t, data); err != nil {
 				logger.Error().Str("topic", t).Err(err).Msg("cannot send SNS message")
@@ -107,11 +110,11 @@ func main() {
 	}
 	r := registrationHandler{
 		OmniSSM: omni,
-		SNS: sns.New(&sns.Config{
-			Config:        config.Config,
+		SNS: sns.New(&awsutil.Config{
 			AssumeRole:    config.SNSPublishRole,
-			EnableTracing: config.XRayTracingEnabled != "",
+			EnableTracing: config.AWSConfig.EnableTracing,
 		}),
+		config: config,
 	}
 	lambda.Start(func(ctx context.Context, req events.APIGatewayProxyRequest) (*events.APIGatewayProxyResponse, error) {
 		switch req.Resource {
@@ -125,17 +128,16 @@ func main() {
 				log.Error().Err(err).Msg("cannot verify request")
 				return nil, lambda.BadRequestError{}
 			}
-			doc := registerReq.Identity()
-			if a := doc.AccountId; !config.IsAuthorized(a) {
+			if a := registerReq.AccountId; !config.IsAuthorized(a) {
 				return nil, lambda.UnauthorizedError{fmt.Sprintf("account not authorized: %#v", a)}
 			}
-			if !omni.RequestVersionValid(registerReq.ClientVersion) {
-				return nil, lambda.BadRequestError{fmt.Sprintf("client version does not meet constraints %#v", omni.Config.ClientVersionConstraints)}
+			if !r.config.RequestVersionValid(registerReq.ClientVersion) {
+				return nil, lambda.BadRequestError{fmt.Sprintf("client version does not meet constraints %#v", r.config.ClientVersionConstraints)}
 			}
 			if amiWhitelist != nil {
-				k := strings.Join([]string{doc.AccountId, doc.Region, doc.ImageId}, ",")
-				if doc.ImageId == "" || !amiWhitelist[k] {
-					return nil, lambda.BadRequestError{fmt.Sprintf("registration from AMI %#v is not permitted", doc.ImageId)}
+				k := strings.Join([]string{registerReq.AccountId, registerReq.Region, registerReq.ImageId}, ",")
+				if registerReq.ImageId == "" || !amiWhitelist[k] {
+					return nil, lambda.BadRequestError{fmt.Sprintf("registration from AMI %#v is not permitted", registerReq.ImageId)}
 				}
 			}
 

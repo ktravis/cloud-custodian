@@ -96,7 +96,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 		name          string
 		request       *RegistrationRequest
 		registry      registry
-		newActivation func(string) (*ssm.Activation, error)
+		newActivation func(string, string) (*ssm.Activation, error)
 		wantDeferred  *DeferredActionMessage
 		wantResponse  *RegistrationResponse
 		checkError    func(error) bool
@@ -125,7 +125,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 			name:          "activiation expired",
 			request:       req,
 			registry:      newMockRegistry(oldActivationEntry),
-			newActivation: func(name string) (*ssm.Activation, error) { return &activationEntry.Activation, nil },
+			newActivation: func(name, r string) (*ssm.Activation, error) { return &activationEntry.Activation, nil },
 			wantResponse: &RegistrationResponse{
 				RegistrationEntry: *activationEntry,
 			},
@@ -135,7 +135,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 			name:          "CreateActivation throttled",
 			request:       req,
 			registry:      &errRegistry{get: ErrRegistrationNotFound},
-			newActivation: func(name string) (*ssm.Activation, error) { return nil, throttleError },
+			newActivation: func(name, r string) (*ssm.Activation, error) { return nil, throttleError },
 			wantDeferred:  &DeferredActionMessage{RequestActivation, req},
 			checkError:    isDeferredError,
 		},
@@ -144,7 +144,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 			name:          "CreateActivation fault",
 			request:       req,
 			registry:      &errRegistry{get: ErrRegistrationNotFound},
-			newActivation: func(name string) (*ssm.Activation, error) { return nil, fatalError },
+			newActivation: func(name, r string) (*ssm.Activation, error) { return nil, fatalError },
 			checkError:    isError(fatalError),
 		},
 
@@ -159,7 +159,7 @@ func TestOmniSSMRequestActivation(t *testing.T) {
 			name:          "registry put error",
 			request:       req,
 			registry:      &errRegistry{get: ErrRegistrationNotFound, put: fatalError},
-			newActivation: func(name string) (*ssm.Activation, error) { return &activationEntry.Activation, nil },
+			newActivation: func(name, r string) (*ssm.Activation, error) { return &activationEntry.Activation, nil },
 			checkError:    isError(fatalError),
 		},
 	}
@@ -696,14 +696,14 @@ var _ deferQueue = (mockQueueFunc)(nil)
 var _ registry = (*mockRegistry)(nil)
 
 type mockSSMAPI struct {
-	newActivation             func(string) (*ssm.Activation, error)
+	newActivation             func(string, string) (*ssm.Activation, error)
 	addTagsToResource         func(*ssm.ResourceTags) error
 	putInventory              func(*ssm.CustomInventory) error
 	deregisterManagedInstance func(string) error
 }
 
-func (s *mockSSMAPI) CreateActivation(ctx context.Context, n string) (*ssm.Activation, error) {
-	return s.newActivation(n)
+func (s *mockSSMAPI) CreateActivation(ctx context.Context, n, r string) (*ssm.Activation, error) {
+	return s.newActivation(n, r)
 }
 func (s *mockSSMAPI) AddTagsToResource(ctx context.Context, tags *ssm.ResourceTags) error {
 	return s.addTagsToResource(tags)

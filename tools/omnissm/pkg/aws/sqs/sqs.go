@@ -21,62 +21,90 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/aws/aws-sdk-go/service/sqs/sqsiface"
 	"github.com/aws/aws-xray-sdk-go/xray"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/awsutil"
 	"github.com/pkg/errors"
 )
 
 type Config struct {
-	*aws.Config
+	AWSConfig *awsutil.Config
+	QueueName string
+	QueueURL  string
+}
 
-	MessageGroupId string
-	QueueName      string
-	QueueURL       string
-	EnableTracing  bool
+type Queue struct {
+	svc    *SQS
+	config *Config
+}
+
+func NewQueue(config *Config) (*Queue, error) {
+	q := &Queue{
+		svc:    New(config.AWSConfig),
+		config: config,
+	}
+
+	if config.QueueURL == "" {
+		url, err := q.svc.GetQueueURL(context.Background(), q.config.QueueName)
+		if err != nil {
+			// TODO: wrap error with context
+			return nil, err
+		}
+		q.config.QueueURL = url
+	}
+	return q, nil
+}
+
+func (q *Queue) Send(ctx context.Context, m json.Marshaler) error {
+	return q.svc.Send(ctx, q.config.QueueURL, m)
+}
+
+func (q *Queue) Receive(ctx context.Context) ([]*Message, error) {
+	return q.svc.Receive(ctx, q.config.QueueURL)
+}
+
+func (q *Queue) Delete(ctx context.Context, receiptHandle string) error {
+	return q.svc.Delete(ctx, q.config.QueueURL, receiptHandle)
 }
 
 type SQS struct {
 	sqsiface.SQSAPI
 
-	config *Config
+	config *awsutil.Config
 }
 
-func New(config *Config) (*SQS, error) {
-	svc := sqs.New(session.New(config.Config))
-	if config.EnableTracing {
+func New(config *awsutil.Config) *SQS {
+	svc := sqs.New(awsutil.Session(config))
+	if config != nil && config.EnableTracing {
 		xray.AWS(svc.Client)
 	}
-	s := &SQS{
+	return &SQS{
 		SQSAPI: svc,
 		config: config,
 	}
-	if s.config.QueueURL == "" {
-		resp, err := s.SQSAPI.GetQueueUrlWithContext(context.TODO(), &sqs.GetQueueUrlInput{
-			QueueName: aws.String(s.config.QueueName),
-		})
-		if err != nil {
-			return nil, err
-		}
-		s.config.QueueURL = *resp.QueueUrl
-	}
-	return s, nil
 }
 
-func (s *SQS) Send(ctx context.Context, m json.Marshaler) error {
+func (s *SQS) GetQueueURL(ctx context.Context, name string) (string, error) {
+	resp, err := s.SQSAPI.GetQueueUrlWithContext(ctx, &sqs.GetQueueUrlInput{
+		QueueName: aws.String(name),
+	})
+	if err != nil {
+		return "", err
+	}
+	return *resp.QueueUrl, nil
+}
+
+func (s *SQS) Send(ctx context.Context, url string, m json.Marshaler) error {
 	data, err := json.Marshal(m)
 	if err != nil {
 		return errors.Wrap(err, "cannot marshal SQS message")
 	}
 	_, err = s.SQSAPI.SendMessageWithContext(ctx, &sqs.SendMessageInput{
 		MessageBody: aws.String(string(data)),
-		QueueUrl:    aws.String(s.config.QueueURL),
+		QueueUrl:    aws.String(url),
 	})
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 type Message struct {
@@ -97,11 +125,10 @@ func parseUnixTime(s string) time.Time {
 	return time.Unix(0, ms*int64(time.Millisecond))
 }
 
-func (s *SQS) Receive(ctx context.Context) ([]*Message, error) {
+func (s *SQS) Receive(ctx context.Context, url string) ([]*Message, error) {
 	resp, err := s.SQSAPI.ReceiveMessageWithContext(ctx, &sqs.ReceiveMessageInput{
-
 		AttributeNames:      aws.StringSlice([]string{"All"}),
-		QueueUrl:            aws.String(s.config.QueueURL),
+		QueueUrl:            aws.String(url),
 		WaitTimeSeconds:     aws.Int64(20),
 		MaxNumberOfMessages: aws.Int64(10),
 	})
@@ -128,9 +155,9 @@ func (s *SQS) Receive(ctx context.Context) ([]*Message, error) {
 	return messages, nil
 }
 
-func (s *SQS) Delete(ctx context.Context, receiptHandle string) error {
+func (s *SQS) Delete(ctx context.Context, url, receiptHandle string) error {
 	_, err := s.SQSAPI.DeleteMessageWithContext(ctx, &sqs.DeleteMessageInput{
-		QueueUrl:      aws.String(s.config.QueueURL),
+		QueueUrl:      aws.String(url),
 		ReceiptHandle: aws.String(receiptHandle),
 	})
 	return errors.Wrap(err, "cannot delete SQS message")

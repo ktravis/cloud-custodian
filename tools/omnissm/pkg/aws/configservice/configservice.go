@@ -21,37 +21,25 @@ import (
 	"sync"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/configservice"
 	"github.com/aws/aws-sdk-go/service/configservice/configserviceiface"
 	"github.com/aws/aws-xray-sdk-go/xray"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/awsutil"
 	"github.com/golang/time/rate"
 	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 )
 
-type Config struct {
-	*aws.Config
-
-	AssumeRole    string
-	EnableTracing bool
-}
-
 type ConfigService struct {
 	configserviceiface.ConfigServiceAPI
 
-	config            *Config
+	config            *awsutil.Config
 	configServiceRate *rate.Limiter
 }
 
-func New(config *Config) *ConfigService {
-	sess := session.New(config.Config)
-	if config.AssumeRole != "" {
-		config.Config.WithCredentials(stscreds.NewCredentials(sess, config.AssumeRole))
-	}
-	svc := configservice.New(session.New(config.Config))
+func New(config *awsutil.Config) *ConfigService {
+	svc := configservice.New(awsutil.Session(config))
 	if config.EnableTracing {
 		xray.AWS(svc.Client)
 	}

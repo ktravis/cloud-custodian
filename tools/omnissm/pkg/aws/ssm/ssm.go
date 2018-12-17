@@ -23,32 +23,25 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ssm"
 	"github.com/aws/aws-sdk-go/service/ssm/ssmiface"
 	"github.com/aws/aws-xray-sdk-go/xray"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/awsutil"
 	"github.com/golang/time/rate"
 	"github.com/pkg/errors"
 )
 
 var ErrInvalidInstance = errors.New("invalid instance id")
 
-type Config struct {
-	*aws.Config
-
-	InstanceRole  string
-	EnableTracing bool
-}
-
 type SSM struct {
 	ssmiface.SSMAPI
 
-	config  *Config
+	config  *awsutil.Config
 	ssmRate *rate.Limiter
 }
 
-func New(config *Config) *SSM {
-	svc := ssm.New(session.New(config.Config))
+func New(config *awsutil.Config) *SSM {
+	svc := ssm.New(awsutil.Session(config))
 	if config.EnableTracing {
 		xray.AWS(svc.Client)
 	}
@@ -65,11 +58,11 @@ type Activation struct {
 	ActivationCode string `json:"ActivationCode"`
 }
 
-func (s *SSM) CreateActivation(ctx context.Context, name string) (*Activation, error) {
+func (s *SSM) CreateActivation(ctx context.Context, name, instanceRole string) (*Activation, error) {
 	s.ssmRate.Wait(ctx)
 	resp, err := s.SSMAPI.CreateActivationWithContext(ctx, &ssm.CreateActivationInput{
 		DefaultInstanceName: aws.String(name),
-		IamRole:             aws.String(s.config.InstanceRole),
+		IamRole:             aws.String(instanceRole),
 		Description:         aws.String(name),
 	})
 	if err != nil {

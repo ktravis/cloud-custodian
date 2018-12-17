@@ -19,11 +19,10 @@ import (
 	"io/ioutil"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3iface"
 	"github.com/aws/aws-xray-sdk-go/xray"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/awsutil"
 	"github.com/golang/time/rate"
 )
 
@@ -37,16 +36,12 @@ type Config struct {
 type S3 struct {
 	s3iface.S3API
 
-	config  *Config
+	config  *awsutil.Config
 	getRate *rate.Limiter
 }
 
-func New(config *Config) *S3 {
-	sess := session.New(config.Config)
-	if config.AssumeRole != "" {
-		config.Config.WithCredentials(stscreds.NewCredentials(sess, config.AssumeRole))
-	}
-	svc := s3.New(session.New(config.Config))
+func New(config *awsutil.Config) *S3 {
+	svc := s3.New(awsutil.Session(config))
 	if config.EnableTracing {
 		xray.AWS(svc.Client)
 	}

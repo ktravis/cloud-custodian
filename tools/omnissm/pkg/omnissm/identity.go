@@ -38,6 +38,7 @@ type InstanceIdentity struct {
 	InstanceId       string `json:"instanceId"`
 	AccountId        string `json:"accountId"`
 	InstanceType     string `json:"instanceType"`
+	ImageId          string `json:"imageId"`
 }
 
 // Name returns the logical name for the instance described in the identity

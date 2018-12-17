@@ -21,14 +21,13 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
-	awsclient "github.com/aws/aws-sdk-go/aws/client"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-xray-sdk-go/xray"
 	"github.com/pkg/errors"
 
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/awsutil"
 	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/ssm"
 )
 
@@ -56,11 +55,10 @@ type RegistrationEntry struct {
 }
 
 type RegistrationsConfig struct {
-	*aws.Config
+	AWSConfig *awsutil.Config
 
-	TableName     string
-	TestDB        dynamodbiface.DynamoDBAPI
-	EnableTracing bool
+	TableName string
+	TestDB    dynamodbiface.DynamoDBAPI
 }
 
 type Registrations struct {
@@ -75,20 +73,13 @@ func NewRegistrations(config *RegistrationsConfig) *Registrations {
 		config:      config,
 	}
 	if r.DynamoDBAPI == nil {
-		svc := dynamodb.New(session.New(config.Config))
-		if config.EnableTracing {
+		svc := dynamodb.New(awsutil.Session(config.AWSConfig))
+		if config.AWSConfig.EnableTracing {
 			xray.AWS(svc.Client)
 		}
 		r.DynamoDBAPI = svc
 	}
 	return r
-}
-
-func (r *Registrations) Client() *awsclient.Client {
-	if d, ok := r.DynamoDBAPI.(*dynamodb.DynamoDB); ok {
-		return d.Client
-	}
-	return nil
 }
 
 func (r *Registrations) queryIndex(ctx context.Context, indexName, attrName, value string) ([]*RegistrationEntry, error) {

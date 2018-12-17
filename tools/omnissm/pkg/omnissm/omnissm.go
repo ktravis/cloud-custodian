@@ -27,7 +27,7 @@ import (
 )
 
 type ssmAPI interface {
-	CreateActivation(context.Context, string) (*ssm.Activation, error)
+	CreateActivation(context.Context, string, string) (*ssm.Activation, error)
 	AddTagsToResource(context.Context, *ssm.ResourceTags) error
 	PutInventory(context.Context, *ssm.CustomInventory) error
 	DeregisterManagedInstance(context.Context, string) error
@@ -60,23 +60,17 @@ func New(config *Config) (*OmniSSM, error) {
 	o := &OmniSSM{
 		config: config,
 		registry: NewRegistrations(&RegistrationsConfig{
-			Config:        config.Config,
-			TableName:     config.RegistrationsTable,
-			EnableTracing: config.XRayTracingEnabled != "",
+			AWSConfig: config.AWSConfig,
+			TableName: config.RegistrationsTable,
 		}),
-		ssmAPI: ssm.New(&ssm.Config{
-			Config:        config.Config,
-			InstanceRole:  config.InstanceRole,
-			EnableTracing: config.XRayTracingEnabled != "",
-		}),
+		ssmAPI: ssm.New(config.AWSConfig),
 	}
 	if config.QueueName != "" {
 		var err error
-		o.deferQueue, err = sqs.New(&sqs.Config{
-			Config:         config.Config,
-			MessageGroupId: "omnissm-event-stream",
-			QueueName:      config.QueueName,
-			EnableTracing:  config.XRayTracingEnabled != "",
+		o.deferQueue, err = sqs.NewQueue(&sqs.Config{
+			AWSConfig: config.AWSConfig,
+			QueueName: config.QueueName,
+			//MessageGroupId: "omnissm-event-stream",
 		})
 		if err != nil {
 			return nil, errors.Wrap(err, "cannot initialize SQS")
@@ -106,7 +100,7 @@ func (o *OmniSSM) RequestActivation(ctx context.Context, req *RegistrationReques
 		// unrelated failure
 		return nil, err
 	}
-	activation, err := o.ssmAPI.CreateActivation(ctx, req.Name())
+	activation, err := o.ssmAPI.CreateActivation(ctx, req.Name(), o.config.InstanceRole)
 	if err != nil {
 		// if we fail here, defer starting over
 		return nil, o.tryDefer(ctx, err, RequestActivation, req)

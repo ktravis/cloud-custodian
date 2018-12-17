@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
+	"github.com/capitalone/cloud-custodian/tools/omnissm/pkg/aws/awsutil"
 	version "github.com/hashicorp/go-version"
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v2"
@@ -31,7 +31,7 @@ import (
 const DefaultSSMServiceRole = "service-role/AmazonEC2RunCommandRoleForManagedInstances"
 
 type Config struct {
-	*aws.Config
+	AWSConfig *awsutil.Config
 
 	Context context.Context
 
@@ -242,7 +242,9 @@ func (c *Config) setDefaults() {
 	for _, t := range c.ResourceTags {
 		c.resourceTags[t] = struct{}{}
 	}
-	c.Config = aws.NewConfig().WithMaxRetries(c.MaxRetries)
+	c.AWSConfig = &awsutil.Config{
+		MaxRetries: c.MaxRetries,
+	}
 }
 
 func (c *Config) RequestVersionValid(vs string) bool {
