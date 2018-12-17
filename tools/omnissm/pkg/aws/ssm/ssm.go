@@ -156,7 +156,9 @@ type ManagedInstance struct {
 	ActivationId     string
 	ManagedId        string
 	Name             string
+	PingStatus       string
 	RegistrationDate time.Time
+	LastPingDate     time.Time
 }
 
 func (s *SSM) DescribeInstanceInformation(ctx context.Context, activationId string) (*ManagedInstance, error) {
@@ -178,8 +180,35 @@ func (s *SSM) DescribeInstanceInformation(ctx context.Context, activationId stri
 			ManagedId:        aws.StringValue(instance.InstanceId),
 			Name:             aws.StringValue(instance.Name),
 			RegistrationDate: aws.TimeValue(instance.RegistrationDate),
+			PingStatus:       aws.StringValue(instance.PingStatus),
+			LastPingDate:     aws.TimeValue(instance.LastPingDateTime),
 		}
 		return m, nil
 	}
 	return nil, errors.Errorf("activation not found: %#v", activationId)
+}
+
+func (s *SSM) DescribeOfflineInstances(ctx context.Context, fn func([]*ManagedInstance, bool) bool) error {
+	params := &ssm.DescribeInstanceInformationInput{
+		InstanceInformationFilterList: []*ssm.InstanceInformationFilter{
+			{
+				Key:      aws.String("PingStatus"),
+				ValueSet: aws.StringSlice([]string{"ConnectionLost"}),
+			},
+		},
+	}
+	return svc.DescribeInstanceInformationPagesWithContext(ctx, params, func(resp *ssm.DescribeInstanceInformationOutput, lastPage bool) bool {
+		page := make([]*ManagedInstance, len(resp.InstanceInformationList))
+		for i, instance := range resp.InstanceInformationList {
+			page[i] = &ManagedInstance{
+				ActivationId:     aws.StringValue(instance.ActivationId),
+				ManagedId:        aws.StringValue(instance.InstanceId),
+				Name:             aws.StringValue(instance.Name),
+				RegistrationDate: aws.TimeValue(instance.RegistrationDate),
+				PingStatus:       aws.StringValue(instance.PingStatus),
+				LastPingDate:     aws.TimeValue(instance.LastPingDateTime),
+			}
+		}
+		return fn(page, lastPage)
+	})
 }
